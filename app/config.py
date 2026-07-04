@@ -17,6 +17,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "punctuate_speech": True,
     "auto_capitalize": True,
     "numbers_as_digits": False,
+    "local_model_status": "package_missing",
     "hotkey_start": "ctrl+shift+r",
     "hotkey_stop": "ctrl+shift+s",
 }

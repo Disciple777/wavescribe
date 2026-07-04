@@ -1,10 +1,14 @@
 """Transcription engine for WaveScribe.
 
-Sends WAV audio bytes to OpenAI Whisper API and returns transcribed text.
-Supports cloud (OpenAI Whisper API) mode.
+Supports two modes:
+- Cloud: sends WAV audio to the OpenAI Whisper API.
+- Local: runs Whisper locally via the openai-whisper package.
 """
 
 import io
+import subprocess
+import sys
+import numpy as np
 from typing import Optional
 
 from openai import OpenAI, APIError, AuthenticationError, APITimeoutError, RateLimitError
@@ -14,6 +18,8 @@ class TranscriptionError(Exception):
     """Raised when transcription fails."""
     pass
 
+
+# ── Cloud mode ──
 
 def transcribe_cloud(wav_bytes: bytes, api_key: str, model: str = "whisper-1") -> str:
     """Send WAV audio to OpenAI Whisper API and return transcribed text.
@@ -83,9 +89,105 @@ def transcribe_cloud(wav_bytes: bytes, api_key: str, model: str = "whisper-1") -
         )
 
 
-def transcribe_local(wav_bytes: bytes, model_size: str = "base") -> str:
-    """Placeholder for local transcription mode.
+# ── Local mode helpers ──
 
-    Local Whisper model support will be added in a future release.
+_whisper_model = None
+"""Cached Whisper model instance (lazy-loaded, shared across calls)."""
+
+
+def is_whisper_available() -> bool:
+    """Check whether the openai-whisper package is importable."""
+    try:
+        import whisper  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def install_whisper_package() -> None:
+    """Install the openai-whisper package via pip.
+
+    Runs ``pip install openai-whisper`` using the currently running
+    Python interpreter's pip.  Raises TranscriptionError on failure.
     """
-    return "[Local transcription is not yet available. Please use Cloud mode with an OpenAI API key.]"
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "openai-whisper"],
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 min timeout for downloading + compiling
+        )
+        if result.returncode != 0:
+            raise TranscriptionError(
+                f"Failed to install Whisper.\n{result.stderr.strip()}"
+            )
+    except subprocess.TimeoutExpired:
+        raise TranscriptionError(
+            "Whisper installation timed out. Check your internet connection and try again."
+        )
+    except OSError as e:
+        raise TranscriptionError(
+            f"Could not run pip: {e}"
+        )
+
+
+def load_whisper_model(model_size: str = "base") -> None:
+    """Download (if needed) and load the requested Whisper model into memory.
+
+    The model is cached globally so subsequent calls are instant.
+    """
+    global _whisper_model
+    import whisper
+    _whisper_model = whisper.load_model(model_size)
+
+
+def transcribe_local(wav_bytes: bytes, model_size: str = "base") -> str:
+    """Transcribe WAV audio using a local Whisper model.
+
+    Args:
+        wav_bytes: WAV file contents as bytes.
+        model_size: Whisper model size to use (tiny / base / small).
+
+    Returns:
+        Transcribed text string.
+
+    Raises:
+        TranscriptionError: If the model isn't loaded or transcription fails.
+    """
+    global _whisper_model
+
+    if _whisper_model is None:
+        raise TranscriptionError(
+            "Whisper model is not loaded. Please install and load the model in Settings first."
+        )
+
+    if not wav_bytes or len(wav_bytes) < 100:
+        raise TranscriptionError(
+            "No audio data to transcribe. Please record something first."
+        )
+
+    try:
+        import whisper
+        # Convert WAV bytes → float32 numpy array (Whisper expects -1..1 range)
+        audio_array = (
+            np.frombuffer(wav_bytes, dtype=np.int16).astype(np.float32)
+            / 32768.0
+        )
+
+        result = _whisper_model.transcribe(
+            audio_array,
+            language="en",       # faster than auto-detect
+            task="transcribe",
+        )
+
+        text = result.get("text", "").strip()
+        if not text:
+            raise TranscriptionError(
+                "Transcription returned empty result. Please try again."
+            )
+        return text
+
+    except TranscriptionError:
+        raise
+    except Exception as e:
+        raise TranscriptionError(f"Local transcription error: {e}")

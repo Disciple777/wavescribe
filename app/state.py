@@ -23,6 +23,15 @@ class AppMode(Enum):
     CLOUD = "cloud"
 
 
+class LocalModelStatus(Enum):
+    """Status of the local Whisper model installation."""
+    PACKAGE_MISSING = "package_missing"
+    INSTALLING = "installing"
+    MODEL_LOADING = "model_loading"
+    READY = "ready"
+    ERROR = "error"
+
+
 @dataclass
 class AppState:
     """Thread-safe application state.
@@ -38,6 +47,7 @@ class AppState:
     punctuate_speech: bool = True
     auto_capitalize: bool = True
     numbers_as_digits: bool = False
+    local_model_status: LocalModelStatus = LocalModelStatus.PACKAGE_MISSING
     last_transcription: str = ""
     error_message: str = ""
 
@@ -108,6 +118,16 @@ class AppState:
     def set_numbers_as_digits(self, enabled: bool) -> None:
         with self._lock:
             self.numbers_as_digits = enabled
+
+    # ── Local Model Status ──
+
+    def get_local_model_status(self) -> LocalModelStatus:
+        with self._lock:
+            return self.local_model_status
+
+    def set_local_model_status(self, status: LocalModelStatus) -> None:
+        with self._lock:
+            self.local_model_status = status
 
     # ── Transcription ──
 

@@ -11,26 +11,41 @@ from typing import Optional
 
 import customtkinter as ctk
 
-from app.state import AppState, AppStatus, AppMode, EventQueue
+from app.state import AppState, AppStatus, AppMode, LocalModelStatus, EventQueue
 from app.audio_capture import AudioCapture, AudioCaptureError
-from app.transcriber import transcribe_cloud, TranscriptionError
+from app.transcriber import (
+    transcribe_cloud,
+    transcribe_local,
+    is_whisper_available,
+    install_whisper_package,
+    load_whisper_model,
+    TranscriptionError,
+)
 from app.formatter import apply_punctuation, auto_capitalize, convert_numbers, clean_spacing, cleanup_redundant_punctuation
 from app.typer import type_text
 from app.config import load_config, save_config
 from app.overlay import StatusOverlay
 from app.hotkeys import HotkeyManager
-
-# ── Color Constants ──
-
-COLOR_GREEN = "#2ecc71"
-COLOR_RED = "#e74c3c"
-COLOR_YELLOW = "#f1c40f"
-COLOR_BG = "#212121"
-COLOR_CARD = "#2b2b2b"
-COLOR_ACCENT = "#1f6aa5"
-COLOR_TEXT = "#ffffff"
-COLOR_TEXT_DIM = "#a0a0a0"
-COLOR_BORDER = "#3a3a3a"
+from app.sounds import init_sounds, play_start_sound, play_stop_sound
+from app.theme import (
+    FONTS,
+    init_fonts,
+    COLOR_GREEN,
+    COLOR_RED,
+    COLOR_YELLOW,
+    COLOR_BG,
+    COLOR_CARD,
+    COLOR_BORDER,
+    COLOR_ACCENT,
+    COLOR_ACCENT_HOVER,
+    COLOR_TEXT,
+    COLOR_TEXT_DIM,
+    COLOR_INPUT_BG,
+    COLOR_GREEN_HOVER,
+    COLOR_RED_HOVER,
+    COLOR_SUCCESS,
+    COLOR_SUCCESS_HOVER,
+)
 
 # ── Window Dimensions ──
 
@@ -49,6 +64,10 @@ class App(ctk.CTk):
         hotkey_mgr: HotkeyManager,
     ):
         super().__init__()
+
+        # Resolve fonts (registers bundled Poppins .ttf) and init sounds
+        init_fonts()
+        init_sounds()
 
         self.app_state = state
         self.audio = audio
@@ -69,6 +88,9 @@ class App(ctk.CTk):
 
         # ── Guard to prevent double auto-insert ──
         self._auto_inserted = False
+
+        # ── Flag to allow cancelling an in-progress transcription ──
+        self._transcription_cancelled = False
 
         # ── Window setup ──
         self.title("WaveScribe")
@@ -120,6 +142,12 @@ class App(ctk.CTk):
         mode_str = self._config.get("mode", "cloud")
         self.app_state.set_mode(AppMode.CLOUD if mode_str == "cloud" else AppMode.LOCAL)
 
+        # Detect local model status — if config says ready but package is gone, reset
+        cfg_status = self._config.get("local_model_status", "package_missing")
+        if cfg_status == "ready" and not is_whisper_available():
+            cfg_status = "package_missing"
+        self.app_state.set_local_model_status(LocalModelStatus(cfg_status))
+
     def _save_current_config(self) -> None:
         """Persist current state + hotkey preferences to config.json."""
         mode = self.app_state.get_mode()
@@ -130,6 +158,7 @@ class App(ctk.CTk):
             "auto_capitalize": self.app_state.get_auto_capitalize(),
             "numbers_as_digits": self.app_state.get_numbers_as_digits(),
             "mode": mode.value,
+            "local_model_status": self.app_state.get_local_model_status().value,
         })
         save_config(self._config)
 
@@ -173,13 +202,13 @@ class App(ctk.CTk):
 
         # Status dot (colored circle)
         self.status_dot = ctk.CTkLabel(
-            inner, text="●", font=("Segoe UI", 16), text_color=COLOR_GREEN, width=20
+            inner, text="●", font=FONTS["icon"], text_color=COLOR_GREEN, width=20
         )
         self.status_dot.pack(side="left")
 
         # Title
         ctk.CTkLabel(
-            inner, text="WaveScribe", font=("Segoe UI", 18, "bold"),
+            inner, text="WaveScribe", font=FONTS["title"],
             text_color=COLOR_TEXT
         ).pack(side="left", padx=(6, 0))
 
@@ -190,7 +219,7 @@ class App(ctk.CTk):
 
         # Status text
         self.status_label = ctk.CTkLabel(
-            inner, text="Idle", font=("Segoe UI", 13),
+            inner, text="Idle", font=FONTS["body"],
             text_color=COLOR_TEXT_DIM
         )
         self.status_label.pack(side="right")
@@ -212,9 +241,18 @@ class App(ctk.CTk):
 
         self.recording_status = ctk.CTkLabel(
             status_frame, text="● Idle",
-            font=("Segoe UI", 14), text_color=COLOR_TEXT_DIM
+            font=FONTS["body_large"], text_color=COLOR_TEXT_DIM
         )
         self.recording_status.pack(side="left")
+
+        # ── Cancel Transcription button (visible only during transcribing) ──
+        self._cancel_transcribe_btn = ctk.CTkButton(
+            status_frame, text="✕ Cancel",
+            font=FONTS["body_small"], height=22, width=80,
+            fg_color=COLOR_RED, hover_color=COLOR_RED_HOVER,
+            text_color="#ffffff", corner_radius=6,
+            command=self._on_cancel_transcription,
+        )
 
         # ── Mode toggle ──
         mode_frame = ctk.CTkFrame(card, fg_color="transparent")
@@ -222,15 +260,15 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             mode_frame, text="Mode:",
-            font=("Segoe UI", 12), text_color=COLOR_TEXT_DIM
+            font=FONTS["body_medium"], text_color=COLOR_TEXT_DIM
         ).pack(side="left")
 
         self.mode_segmented = ctk.CTkSegmentedButton(
             mode_frame,
             values=["Cloud", "Local"],
             selected_color=COLOR_ACCENT,
-            selected_hover_color="#155a8a",
-            font=("Segoe UI", 12),
+            selected_hover_color=COLOR_ACCENT_HOVER,
+            font=FONTS["body_medium"],
             command=self._on_mode_change,
         )
         self.mode_segmented.pack(side="left", padx=(8, 0))
@@ -249,7 +287,7 @@ class App(ctk.CTk):
         )
         self._shortcuts_label = ctk.CTkLabel(
             shortcuts_frame, text=shortcuts_text,
-            font=("Segoe UI", 11), text_color=COLOR_TEXT_DIM,
+            font=FONTS["body_small"], text_color=COLOR_TEXT_DIM,
             justify="left"
         )
         self._shortcuts_label.pack(anchor="w")
@@ -260,8 +298,8 @@ class App(ctk.CTk):
 
         self.record_btn = ctk.CTkButton(
             buttons_frame, text="🎤  Record",
-            font=("Segoe UI", 14, "bold"), height=40,
-            fg_color=COLOR_GREEN, hover_color="#27ae60",
+            font=FONTS["body_large"], height=40,
+            fg_color=COLOR_GREEN, hover_color=COLOR_GREEN_HOVER,
             text_color="#000000",
             corner_radius=8,
             command=self._on_record_click,
@@ -270,9 +308,10 @@ class App(ctk.CTk):
 
         self.stop_btn = ctk.CTkButton(
             buttons_frame, text="⏹  Stop",
-            font=("Segoe UI", 14, "bold"), height=40,
-            fg_color=COLOR_RED, hover_color="#c0392b",
+            font=FONTS["body_large"], height=40,
+            fg_color=COLOR_RED, hover_color=COLOR_RED_HOVER,
             text_color="#ffffff",
+            text_color_disabled="#3a3a3a",
             corner_radius=8,
             state="disabled",
             command=self._on_stop_click,
@@ -293,13 +332,13 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             header_frame, text="Transcription",
-            font=("Segoe UI", 14, "bold"), text_color=COLOR_TEXT
+            font=FONTS["body_large_bold"], text_color=COLOR_TEXT
         ).pack(side="left")
 
         # Clear button
         self.clear_btn = ctk.CTkButton(
             header_frame, text="✕",
-            font=("Segoe UI", 14), width=30, height=24,
+            font=FONTS["body_large"], width=30, height=24,
             fg_color="transparent", hover_color=COLOR_BORDER,
             text_color=COLOR_TEXT_DIM, corner_radius=4,
             command=self._on_clear_transcription,
@@ -309,9 +348,9 @@ class App(ctk.CTk):
         # Textbox
         self.transcription_text = ctk.CTkTextbox(
             card,
-            font=("Segoe UI", 13),
+            font=FONTS["body"],
             text_color=COLOR_TEXT,
-            fg_color="#1a1a1a",
+            fg_color=COLOR_INPUT_BG,
             border_width=1,
             border_color=COLOR_BORDER,
             corner_radius=8,
@@ -325,8 +364,8 @@ class App(ctk.CTk):
         # Insert button
         self.insert_btn = ctk.CTkButton(
             card, text="📝  Insert into Window",
-            font=("Segoe UI", 13, "bold"), height=36,
-            fg_color=COLOR_ACCENT, hover_color="#155a8a",
+            font=FONTS["body"], height=36,
+            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
             text_color="#ffffff",
             corner_radius=8,
             state="disabled",
@@ -348,7 +387,7 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             header_frame, text="Settings",
-            font=("Segoe UI", 14, "bold"), text_color=COLOR_TEXT
+            font=FONTS["body_large_bold"], text_color=COLOR_TEXT
         ).pack(side="left")
 
         # ════════════════════════════════════════
@@ -359,7 +398,7 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             shortcuts_frame, text="Shortcuts",
-            font=("Segoe UI", 12), text_color=COLOR_TEXT_DIM
+            font=FONTS["body_medium"], text_color=COLOR_TEXT_DIM
         ).pack(anchor="w")
 
         # Hotkey entries
@@ -369,7 +408,7 @@ class App(ctk.CTk):
         # --- Start hotkey ---
         ctk.CTkLabel(
             hotkey_grid, text="Start Recording",
-            font=("Segoe UI", 11), text_color=COLOR_TEXT_DIM
+            font=FONTS["body_small"], text_color=COLOR_TEXT_DIM
         ).grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(4, 4))
 
         self._start_hotkey_var = ctk.StringVar(
@@ -378,8 +417,8 @@ class App(ctk.CTk):
         self._start_hotkey_entry = ctk.CTkEntry(
             hotkey_grid,
             textvariable=self._start_hotkey_var,
-            font=("Segoe UI", 12),
-            fg_color="#1a1a1a",
+            font=FONTS["body_medium"],
+            fg_color=COLOR_INPUT_BG,
             border_color=COLOR_BORDER,
             corner_radius=6,
             width=160,
@@ -388,8 +427,8 @@ class App(ctk.CTk):
 
         self._capture_start_btn = ctk.CTkButton(
             hotkey_grid, text="🎯 Capture",
-            font=("Segoe UI", 11), height=28, width=80,
-            fg_color=COLOR_ACCENT, hover_color="#155a8a",
+            font=FONTS["body_small"], height=28, width=80,
+            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
             text_color="#ffffff", corner_radius=6,
             command=lambda: self._start_capturing(is_start=True),
         )
@@ -398,7 +437,7 @@ class App(ctk.CTk):
         # --- Stop hotkey ---
         ctk.CTkLabel(
             hotkey_grid, text="Stop & Transcribe",
-            font=("Segoe UI", 11), text_color=COLOR_TEXT_DIM
+            font=FONTS["body_small"], text_color=COLOR_TEXT_DIM
         ).grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(4, 4))
 
         self._stop_hotkey_var = ctk.StringVar(
@@ -407,8 +446,8 @@ class App(ctk.CTk):
         self._stop_hotkey_entry = ctk.CTkEntry(
             hotkey_grid,
             textvariable=self._stop_hotkey_var,
-            font=("Segoe UI", 12),
-            fg_color="#1a1a1a",
+            font=FONTS["body_medium"],
+            fg_color=COLOR_INPUT_BG,
             border_color=COLOR_BORDER,
             corner_radius=6,
             width=160,
@@ -417,8 +456,8 @@ class App(ctk.CTk):
 
         self._capture_stop_btn = ctk.CTkButton(
             hotkey_grid, text="🎯 Capture",
-            font=("Segoe UI", 11), height=28, width=80,
-            fg_color=COLOR_ACCENT, hover_color="#155a8a",
+            font=FONTS["body_small"], height=28, width=80,
+            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
             text_color="#ffffff", corner_radius=6,
             command=lambda: self._start_capturing(is_start=False),
         )
@@ -430,9 +469,10 @@ class App(ctk.CTk):
         self._save_shortcuts_btn = ctk.CTkButton(
             shortcuts_frame,
             text="💾  Save Shortcuts",
-            font=("Segoe UI", 11, "bold"), height=28,
-            fg_color="#2d7d46", hover_color="#1e6b36",
-            text_color="#ffffff", corner_radius=6,
+            font=FONTS["body_small"], height=28,
+            fg_color=COLOR_GREEN, hover_color=COLOR_GREEN_HOVER,
+            text_color="#000000",
+            corner_radius=6,
             command=self._on_save_shortcuts,
         )
         self._save_shortcuts_btn.pack(anchor="w", pady=(6, 0))
@@ -450,19 +490,56 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             model_frame, text="Model Size",
-            font=("Segoe UI", 12), text_color=COLOR_TEXT_DIM
+            font=FONTS["body_medium"], text_color=COLOR_TEXT_DIM
         ).pack(anchor="w")
 
         self.model_segmented = ctk.CTkSegmentedButton(
             model_frame,
             values=["tiny", "base", "small"],
             selected_color=COLOR_ACCENT,
-            selected_hover_color="#155a8a",
-            font=("Segoe UI", 12),
+            selected_hover_color=COLOR_ACCENT_HOVER,
+            font=FONTS["body_medium"],
             command=self._on_model_change,
         )
         self.model_segmented.pack(fill="x", pady=(4, 0))
         self.model_segmented.set(self.app_state.get_model_size())
+
+        # ════════════════════════════════════════
+        # ── Local Model Install ──
+        # ════════════════════════════════════════
+        self._local_model_frame = ctk.CTkFrame(card, fg_color="transparent")
+        self._local_model_frame.pack(fill="x", padx=20, pady=(0, 12))
+
+        ctk.CTkLabel(
+            self._local_model_frame, text="Local Model",
+            font=FONTS["body_medium"], text_color=COLOR_TEXT_DIM
+        ).pack(anchor="w")
+
+        self._local_model_status_label = ctk.CTkLabel(
+            self._local_model_frame,
+            text="",
+            font=FONTS["body_small"],
+            text_color=COLOR_TEXT_DIM,
+            anchor="w",
+            justify="left",
+        )
+        self._local_model_status_label.pack(fill="x", pady=(4, 4))
+
+        self._install_model_btn = ctk.CTkButton(
+            self._local_model_frame,
+            text="📥  Install Whisper Model",
+            font=FONTS["body_small"], height=28,
+            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
+            text_color="#ffffff",
+            corner_radius=6,
+            command=self._on_install_local_model,
+        )
+        self._install_model_btn.pack(anchor="w")
+
+        # Separator
+        ctk.CTkFrame(
+            card, fg_color=COLOR_BORDER, height=1
+        ).pack(fill="x", padx=20, pady=(8, 0))
 
         # ════════════════════════════════════════
         # ── API Key ──
@@ -472,7 +549,7 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             api_frame, text="OpenAI API Key",
-            font=("Segoe UI", 12), text_color=COLOR_TEXT_DIM
+            font=FONTS["body_medium"], text_color=COLOR_TEXT_DIM
         ).pack(anchor="w")
 
         api_input_frame = ctk.CTkFrame(api_frame, fg_color="transparent")
@@ -482,8 +559,8 @@ class App(ctk.CTk):
             api_input_frame,
             placeholder_text="sk-...",
             show="*",
-            font=("Segoe UI", 12),
-            fg_color="#1a1a1a",
+            font=FONTS["body_medium"],
+            fg_color=COLOR_INPUT_BG,
             border_color=COLOR_BORDER,
             corner_radius=6,
         )
@@ -496,9 +573,10 @@ class App(ctk.CTk):
 
         self.save_api_btn = ctk.CTkButton(
             api_input_frame, text="Save",
-            font=("Segoe UI", 12, "bold"), height=32,
-            fg_color=COLOR_ACCENT, hover_color="#155a8a",
-            text_color="#ffffff", corner_radius=6,
+            font=FONTS["body_medium"], height=32,
+            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
+            text_color="#ffffff",
+            corner_radius=6,
             command=self._on_save_api_key,
         )
         self.save_api_btn.pack(side="right", padx=(8, 0))
@@ -511,7 +589,7 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             format_frame, text="Smart Formatting",
-            font=("Segoe UI", 12), text_color=COLOR_TEXT_DIM
+            font=FONTS["body_medium"], text_color=COLOR_TEXT_DIM
         ).pack(anchor="w")
 
         # --- Punctuation via Speech ---
@@ -520,13 +598,13 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             punct_frame, text="🎤 Punctuation via speech  (\"comma\" → \",\")",
-            font=("Segoe UI", 11), text_color=COLOR_TEXT,
+            font=FONTS["body_small"], text_color=COLOR_TEXT,
             anchor="w"
         ).pack(side="left")
 
         self._punct_switch = ctk.CTkSwitch(
             punct_frame, text="",
-            font=("Segoe UI", 11),
+            font=FONTS["body_small"],
             progress_color=COLOR_ACCENT,
             command=self._on_punctuate_speech_toggle,
         )
@@ -542,13 +620,13 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             cap_frame, text="A🔠 Auto-capitalize sentences",
-            font=("Segoe UI", 11), text_color=COLOR_TEXT,
+            font=FONTS["body_small"], text_color=COLOR_TEXT,
             anchor="w"
         ).pack(side="left")
 
         self._capitalize_switch = ctk.CTkSwitch(
             cap_frame, text="",
-            font=("Segoe UI", 11),
+            font=FONTS["body_small"],
             progress_color=COLOR_ACCENT,
             command=self._on_auto_capitalize_toggle,
         )
@@ -564,13 +642,13 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             num_frame, text="1️⃣ Numbers as digits  (\"one\" → \"1\")",
-            font=("Segoe UI", 11), text_color=COLOR_TEXT,
+            font=FONTS["body_small"], text_color=COLOR_TEXT,
             anchor="w"
         ).pack(side="left")
 
         self._numbers_switch = ctk.CTkSwitch(
             num_frame, text="",
-            font=("Segoe UI", 11),
+            font=FONTS["body_small"],
             progress_color=COLOR_ACCENT,
             command=self._on_numbers_as_digits_toggle,
         )
@@ -587,7 +665,7 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             footer_frame, text="WaveScribe v0.1.0",
-            font=("Segoe UI", 11), text_color=COLOR_TEXT_DIM
+            font=FONTS["body_small"], text_color=COLOR_TEXT_DIM
         ).pack()
 
     # ── Hotkey Capture (tkinter-based) ──
@@ -752,8 +830,10 @@ class App(ctk.CTk):
     def _start_recording(self) -> None:
         """Start audio capture."""
         self._auto_inserted = False
+        self._transcription_cancelled = False
         self.app_state.set_status(AppStatus.RECORDING)
         self._update_ui()
+        play_start_sound()
 
         try:
             self.audio.start()
@@ -771,6 +851,7 @@ class App(ctk.CTk):
         """
         self.app_state.set_status(AppStatus.TRANSCRIBING)
         self._update_ui()
+        play_stop_sound()
 
         # Stop audio capture in a background thread
         def _do_stop() -> None:
@@ -793,10 +874,24 @@ class App(ctk.CTk):
 
                     text = transcribe_cloud(wav_bytes, api_key)
                 else:
-                    text = (
-                        "[Local transcription is not yet available. "
-                        "Please use Cloud mode.]"
-                    )
+                    local_status = self.app_state.get_local_model_status()
+                    if local_status != LocalModelStatus.READY:
+                        self.app_state.set_status(AppStatus.ERROR)
+                        self.app_state.set_error_message(
+                            "Whisper model not ready. Please install it in Settings."
+                        )
+                        self.after(0, self._update_ui)
+                        return
+
+                    model_size = self.app_state.get_model_size()
+                    text = transcribe_local(wav_bytes, model_size)
+
+                # If transcription was cancelled, don't update UI
+                if self._transcription_cancelled:
+                    return
+
+                # Reset the flag for next use
+                self._transcription_cancelled = False
 
                 # Apply smart formatting steps based on individual toggles
                 if self.app_state.get_punctuate_speech():
@@ -865,18 +960,65 @@ class App(ctk.CTk):
         self.app_state.set_last_transcription("")
         self._update_ui()
 
+    def _on_cancel_transcription(self) -> None:
+        """Cancel the current transcription and return to idle."""
+        self._transcription_cancelled = True
+        self.app_state.set_status(AppStatus.IDLE)
+        self.app_state.clear_error()
+        self._update_ui()
+
     def _on_mode_change(self, value: str) -> None:
-        """Handle mode toggle change."""
+        """Handle mode toggle change and persist immediately."""
         mode = AppMode.CLOUD if value == "Cloud" else AppMode.LOCAL
         self.app_state.set_mode(mode)
-        self._config_dirty = True
+        self._save_current_config()
         self.app_state.set_status(AppStatus.IDLE)
         self._update_ui()
 
+    def _on_install_local_model(self) -> None:
+        """Install the Whisper package and load the model in a background thread."""
+        self.app_state.set_local_model_status(LocalModelStatus.INSTALLING)
+        self._install_model_btn.configure(state="disabled", text="⏳  Installing Whisper...")
+        self._local_model_status_label.configure(
+            text="Downloading and installing openai-whisper package...",
+            text_color=COLOR_YELLOW,
+        )
+
+        def _do_install() -> None:
+            try:
+                install_whisper_package()
+
+                self.app_state.set_local_model_status(LocalModelStatus.MODEL_LOADING)
+                self.after(0, lambda: self._local_model_status_label.configure(
+                    text="Downloading Whisper model weights (first-time download)...",
+                    text_color=COLOR_YELLOW,
+                ))
+
+                model_size = self.app_state.get_model_size()
+                load_whisper_model(model_size)
+
+                self.app_state.set_local_model_status(LocalModelStatus.READY)
+                self.after(0, self._update_ui)
+
+            except (TranscriptionError, Exception):
+                self.app_state.set_local_model_status(LocalModelStatus.ERROR)
+                self.after(0, self._update_ui)
+
+        thread = threading.Thread(target=_do_install, daemon=True)
+        thread.start()
+
+    def _update_local_model_ui(self, status: str, is_error: bool = False) -> None:
+        """Update the local model install UI after install attempt."""
+        self._install_model_btn.configure(state="normal")
+        self._local_model_status_label.configure(
+            text=status,
+            text_color=COLOR_RED if is_error else COLOR_GREEN,
+        )
+
     def _on_model_change(self, value: str) -> None:
-        """Handle model size selection change."""
+        """Handle model size selection change and persist immediately."""
         self.app_state.set_model_size(value)
-        self._config_dirty = True
+        self._save_current_config()
 
     def _on_save_api_key(self) -> None:
         """Save the API key from the entry field and persist to config immediately."""
@@ -895,22 +1037,22 @@ class App(ctk.CTk):
             ))
 
     def _on_punctuate_speech_toggle(self) -> None:
-        """Handle punctuation via speech toggle."""
+        """Handle punctuation via speech toggle and persist immediately."""
         enabled = bool(self._punct_switch.get())
         self.app_state.set_punctuate_speech(enabled)
-        self._config_dirty = True
+        self._save_current_config()
 
     def _on_auto_capitalize_toggle(self) -> None:
-        """Handle auto-capitalize toggle."""
+        """Handle auto-capitalize toggle and persist immediately."""
         enabled = bool(self._capitalize_switch.get())
         self.app_state.set_auto_capitalize(enabled)
-        self._config_dirty = True
+        self._save_current_config()
 
     def _on_numbers_as_digits_toggle(self) -> None:
-        """Handle numbers as digits toggle."""
+        """Handle numbers as digits toggle and persist immediately."""
         enabled = bool(self._numbers_switch.get())
         self.app_state.set_numbers_as_digits(enabled)
-        self._config_dirty = True
+        self._save_current_config()
 
     def _on_save_shortcuts(self) -> None:
         """Save the custom hotkeys, re-register them, and persist to config."""
@@ -921,11 +1063,11 @@ class App(ctk.CTk):
         if "+" not in start_hk or "+" not in stop_hk:
             self._save_shortcuts_btn.configure(
                 text="⚠️  Invalid shortcut (use ctrl+shift+x)",
-                fg_color="#c0392b",
+                fg_color=COLOR_RED,
             )
             self.after(2500, lambda: self._save_shortcuts_btn.configure(
                 text="💾  Save Shortcuts",
-                fg_color="#2d7d46",
+                fg_color=COLOR_GREEN,
             ))
             return
 
@@ -950,7 +1092,7 @@ class App(ctk.CTk):
         )
         self.after(2000, lambda: self._save_shortcuts_btn.configure(
             text="💾  Save Shortcuts",
-            fg_color="#2d7d46", text_color="#ffffff",
+            fg_color=COLOR_GREEN, text_color="#000000",
         ))
 
     @staticmethod
@@ -968,6 +1110,58 @@ class App(ctk.CTk):
             self._shortcuts_label.configure(text=text)
 
     # ── UI Updates ──
+
+    def _update_local_model_visibility(self) -> None:
+        """Show/hide the local model install controls based on the current status."""
+        status = self.app_state.get_local_model_status()
+
+        if status == LocalModelStatus.PACKAGE_MISSING:
+            self._local_model_frame.pack(fill="x", padx=20, pady=(0, 12))
+            self._local_model_status_label.configure(
+                text="Whisper package not installed. Click below to install.",
+                text_color=COLOR_TEXT_DIM,
+            )
+            self._install_model_btn.configure(
+                state="normal",
+                text="📥  Install Whisper Model",
+                fg_color=COLOR_ACCENT,
+            )
+        elif status == LocalModelStatus.INSTALLING:
+            self._local_model_frame.pack(fill="x", padx=20, pady=(0, 12))
+            self._local_model_status_label.configure(
+                text="⏳  Installing openai-whisper package...",
+                text_color=COLOR_YELLOW,
+            )
+            self._install_model_btn.configure(state="disabled", text="⏳  Installing...")
+        elif status == LocalModelStatus.MODEL_LOADING:
+            self._local_model_frame.pack(fill="x", padx=20, pady=(0, 12))
+            self._local_model_status_label.configure(
+                text="⏳  Downloading Whisper model weights (first-time)...",
+                text_color=COLOR_YELLOW,
+            )
+            self._install_model_btn.configure(state="disabled", text="⏳  Downloading...")
+        elif status == LocalModelStatus.READY:
+            self._local_model_frame.pack(fill="x", padx=20, pady=(0, 12))
+            self._local_model_status_label.configure(
+                text="✅  Whisper model ready",
+                text_color=COLOR_GREEN,
+            )
+            self._install_model_btn.configure(
+                state="normal",
+                text="✅  Reinstall Model",
+                fg_color=COLOR_ACCENT,
+            )
+        elif status == LocalModelStatus.ERROR:
+            self._local_model_frame.pack(fill="x", padx=20, pady=(0, 12))
+            self._local_model_status_label.configure(
+                text="❌  Installation failed. Check connection and try again.",
+                text_color=COLOR_RED,
+            )
+            self._install_model_btn.configure(
+                state="normal",
+                text="🔄  Retry Installation",
+                fg_color=COLOR_RED,
+            )
 
     def _update_ui(self) -> None:
         """Update all UI elements based on current state and show overlay."""
@@ -1003,6 +1197,12 @@ class App(ctk.CTk):
         else:
             self.recording_status.configure(text_color=COLOR_TEXT_DIM)
 
+        # ── Cancel transcription button — visible only during transcribing ──
+        if status == AppStatus.TRANSCRIBING:
+            self._cancel_transcribe_btn.pack(side="right", padx=(8, 0))
+        else:
+            self._cancel_transcribe_btn.pack_forget()
+
         # ── Buttons ──
         if status == AppStatus.IDLE:
             self.record_btn.configure(state="normal")
@@ -1035,6 +1235,9 @@ class App(ctk.CTk):
             self.transcription_text.insert("1.0", f"⚠️ {error_msg}")
             self.transcription_text.configure(state="disabled")
             self.insert_btn.configure(state="disabled")
+
+        # ── Local model install UI ──
+        self._update_local_model_visibility()
 
         # ── Overlay (floating status indicator) ──
         overlay_map = {

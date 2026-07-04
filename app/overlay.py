@@ -7,13 +7,7 @@ see the app status even when the main window is minimized.
 
 import customtkinter as ctk
 
-# ── Colors (match gui.py) ──
-
-COLOR_GREEN = "#2ecc71"
-COLOR_RED = "#e74c3c"
-COLOR_YELLOW = "#f1c40f"
-COLOR_CARD = "#2b2b2b"
-COLOR_TEXT = "#ffffff"
+from app.theme import FONTS, COLOR_GREEN, COLOR_RED, COLOR_YELLOW, COLOR_CARD, COLOR_TEXT, COLOR_BORDER
 
 
 class StatusOverlay:
@@ -47,14 +41,14 @@ class StatusOverlay:
             fg_color=COLOR_CARD,
             corner_radius=10,
             border_width=1,
-            border_color="#3a3a3a",
+            border_color=COLOR_BORDER,
         )
         frame.pack(fill="both", expand=True, padx=2, pady=2)
 
         self._label = ctk.CTkLabel(
             frame,
             text="",
-            font=("Segoe UI", 13, "bold"),
+            font=FONTS["body_bold"],
             text_color=COLOR_TEXT,
         )
         self._label.pack(fill="both", expand=True, padx=18, pady=(8, 10))
