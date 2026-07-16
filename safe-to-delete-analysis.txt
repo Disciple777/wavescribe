@@ -1,0 +1,102 @@
+WaveScribe - Safe to Delete Analysis
+=====================================
+
+Your project is using approximately 3.5 GB of disk space.
+Here's the breakdown and what's safe to delete.
+
+
+EXISTING PROJECT SIZES (sorted by size)
+---------------------------------------
+
+  1,476.3 MB  dist/              ← PyInstaller bundled executable output
+  1,021.4 MB  .venv/             ← Python virtual environment
+    596.8 MB  installer/         ← Inno Setup installer (.exe)
+    413.8 MB  build/             ← PyInstaller temporary build artifacts
+      0.9 MB  assets/            ← Icons & fonts (needed)
+      0.2 MB  app/               ← Source code (needed)
+      0.1 MB  tests/             ← Test files (needed)
+      0.0 MB  __pycache__/       ← Python bytecode cache (safe to delete)
+     ~0.1 MB  (other root files) ← README, config, scripts, etc.
+
+
+═══════════════════════════════════════════════════════
+  SAFE TO DELETE (100% rebuildable — no data loss)
+═══════════════════════════════════════════════════════
+
+1. dist/  — 1,476.3 MB (≈1.5 GB)
+   └── The PyInstaller-bundled application output.
+       Contains dist/WaveScribe/ with _internal/ including:
+       • torch (360 MB)
+       • whisper_models (139 MB)
+       • llvmlite (115 MB)
+       • scipy (51 MB)
+       • numpy + numpy.libs (26 MB)
+       • PIL (13 MB)
+       • pydantic_core, tiktoken, whisper, etc.
+       ───────────────────────────────────────────
+       🔁 Recreate with:  python build_windows.py
+       (or just run PyInstaller directly)
+
+2. build/  — 413.8 MB (≈400 MB)
+   └── PyInstaller work files (temp analysis, .toc, etc.).
+       These are intermediate artifacts from the last build.
+       ───────────────────────────────────────────
+       🔁 Automatically regenerated on the next build.
+       Safe to delete at any time.
+
+3. installer/  — 596.8 MB (≈600 MB)
+   └── Contains WaveScribe-Setup-0.1.0.exe (the Inno Setup installer).
+       ───────────────────────────────────────────
+       🔁 Recreate with:  python build_windows.py --installer
+       (requires Inno Setup installed)
+
+4. __pycache__/  — < 1 MB (negligible)
+   └── Python bytecode caches scattered across directories.
+       ───────────────────────────────────────────
+       🔁 Automatically regenerated on next Python run.
+       Safe to delete at any time.
+
+
+═══════════════════════════════════════════════════════
+  OPTIONAL TO DELETE (if you don't mind re-setting up)
+═══════════════════════════════════════════════════════
+
+5. .venv/  — 1,021.4 MB (≈1 GB)
+   └── The Python virtual environment with all installed packages.
+       ───────────────────────────────────────────
+       ⚠️  You need this to run or test the project.
+          But you can delete it and re-create with:
+          
+          python -m venv .venv
+          .venv\Scripts\activate
+          pip install -r requirements.txt
+       
+       🔁 Recreate time: ~2-5 minutes (downloads packages)
+
+
+═══════════════════════════════════════════════════════
+  MUST KEEP (essential for testing)
+═══════════════════════════════════════════════════════
+
+  app/             (0.2 MB)  ← Source code
+  tests/           (0.1 MB)  ← Unit tests
+  assets/          (0.9 MB)  ← Icons & fonts
+  main.py          (2 KB)    ← Entry point
+  requirements.txt (714 B)   ← Dependency list
+  README.md                 ← Documentation
+  (other small files)       ← Build scripts, config, etc.
+
+
+═══════════════════════════════════════════════════════
+  SPACE RECOVERY SUMMARY
+═══════════════════════════════════════════════════════
+
+  Delete  dist/ + build/ + installer/ + __pycache__/
+  → Recovers:  ~2.49 GB
+
+  Also delete .venv/
+  → Recovers:  ~1.02 GB (additional)
+
+  ─────────────────────────────────────
+  Total potential recovery:  ~3.5 GB
+  Essential project size:     ~1.5 MB (source + tests + assets)

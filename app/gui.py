@@ -19,6 +19,7 @@ from app.transcriber import (
     is_whisper_available,
     install_whisper_package,
     load_whisper_model,
+    setup_bundled_model,
     TranscriptionError,
 )
 from app.formatter import apply_punctuation, auto_capitalize, convert_numbers, clean_spacing, cleanup_redundant_punctuation
@@ -78,6 +79,20 @@ class App(ctk.CTk):
         self._config = load_config()
         self._apply_config_to_state()
         self._config_dirty = False
+
+        # ── Copy bundled Whisper model to cache if needed ──
+        # This ensures the model file is on disk without an extra download
+        setup_bundled_model()
+
+        # ── If whisper is available and marked ready, load model in background ──
+        # load_whisper_model() actually calls whisper.load_model() to populate the
+        # global _whisper_model variable; without this, transcribe_local() will
+        # refuse with "Whisper model is not loaded."
+        if (
+            is_whisper_available()
+            and self.app_state.get_local_model_status() == LocalModelStatus.READY
+        ):
+            self._load_local_model_in_background()
 
         # ── Status overlay (floating indicator) ──
         self._overlay = StatusOverlay()
@@ -975,6 +990,25 @@ class App(ctk.CTk):
         self.app_state.set_status(AppStatus.IDLE)
         self._update_ui()
 
+    def _load_local_model_in_background(self) -> None:
+        """Load the bundled/local Whisper model into memory in a background thread.
+
+        This calls ``load_whisper_model()`` which runs
+        ``whisper.load_model()`` to populate the global ``_whisper_model``
+        variable.  Without this, ``transcribe_local()`` will refuse with
+        "Whisper model is not loaded."
+        """
+        def _do_load() -> None:
+            try:
+                model_size = self.app_state.get_model_size()
+                load_whisper_model(model_size)
+            except Exception:
+                self.app_state.set_local_model_status(LocalModelStatus.ERROR)
+                self.after(0, self._update_ui)
+
+        thread = threading.Thread(target=_do_load, daemon=True)
+        thread.start()
+
     def _on_install_local_model(self) -> None:
         """Install the Whisper package and load the model in a background thread."""
         self.app_state.set_local_model_status(LocalModelStatus.INSTALLING)
@@ -1035,6 +1069,8 @@ class App(ctk.CTk):
             self.after(2000, lambda: self.save_api_btn.configure(
                 text="Save", fg_color=COLOR_ACCENT, text_color="#ffffff"
             ))
+            # Update UI so Record button enables if Cloud mode + key was missing
+            self._update_ui()
 
     def _on_punctuate_speech_toggle(self) -> None:
         """Handle punctuation via speech toggle and persist immediately."""
@@ -1204,8 +1240,16 @@ class App(ctk.CTk):
             self._cancel_transcribe_btn.pack_forget()
 
         # ── Buttons ──
+        # Determine if Record should be enabled (Cloud needs API key, Local always ok)
+        mode = self.app_state.get_mode()
+        cloud_missing_key = (mode == AppMode.CLOUD and not self.app_state.get_api_key())
+        record_enabled = not cloud_missing_key
+
         if status == AppStatus.IDLE:
-            self.record_btn.configure(state="normal")
+            if record_enabled:
+                self.record_btn.configure(state="normal")
+            else:
+                self.record_btn.configure(state="disabled")
             self.stop_btn.configure(state="disabled")
         elif status == AppStatus.RECORDING:
             self.record_btn.configure(state="disabled")
@@ -1228,8 +1272,20 @@ class App(ctk.CTk):
             self.insert_btn.configure(state="disabled")
         self.transcription_text.configure(state="disabled")
 
+        # ── Cloud mode missing API key notice ──
+        if status == AppStatus.IDLE and cloud_missing_key:
+            self.transcription_text.configure(state="normal")
+            self.transcription_text.delete("1.0", "end")
+            self.transcription_text.insert(
+                "1.0",
+                "🔑  Enter your OpenAI API key in Settings above, then click Record.\n\n"
+                "Or switch to the Local model to transcribe without an API key."
+            )
+            self.transcription_text.configure(state="disabled")
+            self.insert_btn.configure(state="disabled")
+
         # ── Error display ──
-        if status == AppStatus.ERROR and error_msg:
+        elif status == AppStatus.ERROR and error_msg:
             self.transcription_text.configure(state="normal")
             self.transcription_text.delete("1.0", "end")
             self.transcription_text.insert("1.0", f"⚠️ {error_msg}")

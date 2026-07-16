@@ -6,6 +6,8 @@ Supports two modes:
 """
 
 import io
+import os
+import shutil
 import subprocess
 import sys
 import numpy as np
@@ -17,6 +19,66 @@ from openai import OpenAI, APIError, AuthenticationError, APITimeoutError, RateL
 class TranscriptionError(Exception):
     """Raised when transcription fails."""
     pass
+
+
+# ── Bundled Model Setup ──
+
+def _get_whisper_cache_dir() -> str:
+    """Get the Whisper model cache directory (same folder used by whisper.load_model)."""
+    return os.path.join(os.path.expanduser("~"), ".cache", "whisper")
+
+
+def setup_bundled_model() -> bool:
+    """Copy the bundled Whisper model file(s) to the user's whisper cache.
+
+    When running from a PyInstaller bundle, the model .pt file is stored
+    in the ``whisper_models/`` directory inside the bundle.  On first run
+    (or if the user cache is empty), we copy it there so
+    ``whisper.load_model()`` finds it without downloading.
+
+    Returns:
+        True if the model is now available (either already cached or
+        successfully copied), False otherwise.
+    """
+    cache_dir = _get_whisper_cache_dir()
+    target_path = os.path.join(cache_dir, "base.pt")
+
+    # Already cached?  Done.
+    if os.path.exists(target_path):
+        return True
+
+    # Look for bundled model file (PyInstaller puts it in _internal/whisper_models/)
+    # In dev mode, there's no bundling — model may need downloading later
+    bundle_sources = [
+        # PyInstaller bundle path
+        os.path.join(os.path.dirname(sys.executable), "_internal", "whisper_models", "base.pt"),
+        # Alternative: alongside the exe
+        os.path.join(os.path.dirname(sys.executable), "whisper_models", "base.pt"),
+    ]
+
+    # Also check relative to the running script (for dev/testing with --add-data)
+    try:
+        bundle_sources.append(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "whisper_models", "base.pt")
+        )
+    except NameError:
+        pass
+
+    source_path = None
+    for sp in bundle_sources:
+        if os.path.exists(sp):
+            source_path = sp
+            break
+
+    if source_path is None:
+        return False  # No bundled model found
+
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        shutil.copy2(source_path, target_path)
+        return True
+    except OSError:
+        return False
 
 
 # ── Cloud mode ──
