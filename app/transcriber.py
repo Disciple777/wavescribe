@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import sys
 import numpy as np
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from openai import OpenAI, APIError, AuthenticationError, APITimeoutError, RateLimitError
 
@@ -19,6 +19,178 @@ from openai import OpenAI, APIError, AuthenticationError, APITimeoutError, RateL
 class TranscriptionError(Exception):
     """Raised when transcription fails."""
     pass
+
+
+# ── Timed transcription (shared with SubtitleForge) ──
+
+
+def transcribe_cloud_timed(
+    wav_bytes: bytes,
+    api_key: str,
+    model: str = "whisper-1",
+    language: str | None = None,
+    prompt: str | None = None,
+) -> List[Dict[str, Any]]:
+    """Transcribe WAV audio and return timed segments with start/end times.
+
+    Uses ``response_format="verbose_json"`` so the API returns per-word
+    or per-phrase segments ideal for SRT/VTT subtitle generation.
+
+    Args:
+        wav_bytes: WAV file contents as bytes.
+        api_key: OpenAI API key.
+        model: Whisper model (default: whisper-1).
+        language: Optional language code (e.g. "en", "es").
+        prompt: Optional prompt to guide the model.
+
+    Returns:
+        List of segment dicts, each with keys:
+          - "id" (int): segment index
+          - "start" (float): start time in seconds
+          - "end" (float): end time in seconds
+          - "text" (str): transcribed text for this segment
+          - "avg_logprob" (float): confidence
+
+    Raises:
+        TranscriptionError: If the API call fails.
+    """
+    if not api_key:
+        raise TranscriptionError(
+            "No API key configured. Please enter your OpenAI API key."
+        )
+
+    if not wav_bytes or len(wav_bytes) < 100:
+        raise TranscriptionError("No audio data to transcribe.")
+
+    try:
+        client = OpenAI(api_key=api_key)
+
+        audio_file = io.BytesIO(wav_bytes)
+        audio_file.name = "audio.wav"
+
+        kwargs: Dict[str, Any] = dict(
+            model=model,
+            file=audio_file,
+            response_format="verbose_json",
+        )
+        if language:
+            kwargs["language"] = language
+        if prompt:
+            kwargs["prompt"] = prompt
+
+        transcript = client.audio.transcriptions.create(**kwargs)
+
+        segments: List[Dict[str, Any]] = []
+        for seg in transcript.segments:
+            segments.append({
+                "id": seg.id,
+                "start": seg.start,
+                "end": seg.end,
+                "text": seg.text.strip(),
+                "avg_logprob": getattr(seg, "avg_logprob", None),
+            })
+
+        if not segments:
+            raise TranscriptionError(
+                "Transcription returned no timed segments. Try again."
+            )
+
+        return segments
+
+    except AuthenticationError:
+        raise TranscriptionError(
+            "Invalid API key. Please check your OpenAI API key."
+        )
+    except RateLimitError:
+        raise TranscriptionError(
+            "Rate limit exceeded. Please wait and try again."
+        )
+    except APITimeoutError:
+        raise TranscriptionError(
+            "Request timed out. Check your internet connection."
+        )
+    except APIError as e:
+        raise TranscriptionError(f"OpenAI API error: {e}")
+    except TranscriptionError:
+        raise
+    except Exception as e:
+        raise TranscriptionError(f"Unexpected transcription error: {e}")
+
+
+def transcribe_local_timed(
+    wav_bytes: bytes,
+    model_size: str = "base",
+    language: str | None = "en",
+) -> List[Dict[str, Any]]:
+    """Transcribe WAV audio using the local Whisper model and return timed segments.
+
+    Args:
+        wav_bytes: WAV file contents as bytes (16-bit PCM).
+        model_size: Whisper model size (tiny / base / small).
+        language: Language code or None for auto-detect.
+
+    Returns:
+        List of segment dicts, each with keys:
+          - "id" (int): segment index
+          - "start" (float): start time in seconds
+          - "end" (float): end time in seconds
+          - "text" (str): transcribed text for this segment
+          - "avg_logprob" (float): confidence
+
+    Raises:
+        TranscriptionError: If model is not loaded or transcription fails.
+    """
+    global _whisper_model
+
+    if _whisper_model is None:
+        # Attempt to load on-demand
+        if not is_whisper_available():
+            raise TranscriptionError(
+                "Whisper package is not installed. Please install it in Settings."
+            )
+        load_whisper_model(model_size)
+
+    if not wav_bytes or len(wav_bytes) < 100:
+        raise TranscriptionError("No audio data to transcribe.")
+
+    try:
+        import whisper  # noqa: F811
+
+        audio_array = (
+            np.frombuffer(wav_bytes, dtype=np.int16).astype(np.float32)
+            / 32768.0
+        )
+
+        kwargs: Dict[str, Any] = dict(
+            task="transcribe",
+            verbose=False,  # don't print progress to console
+        )
+        if language:
+            kwargs["language"] = language
+
+        result = _whisper_model.transcribe(audio_array, **kwargs)
+
+        segments: List[Dict[str, Any]] = []
+        for seg in result.get("segments", []):
+            segments.append({
+                "id": seg["id"],
+                "start": seg["start"],
+                "end": seg["end"],
+                "text": seg["text"].strip(),
+                "avg_logprob": seg.get("avg_logprob", None),
+            })
+
+        if not segments:
+            raise TranscriptionError(
+                "Transcription returned no timed segments."
+            )
+
+        return segments
+
+    except TranscriptionError:
+        raise
+    except Exception as e:
+        raise TranscriptionError(f"Local transcription error: {e}")
 
 
 # ── Bundled Model Setup ──
