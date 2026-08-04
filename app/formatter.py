@@ -103,6 +103,46 @@ _NO_SPACE_AFTER = set("([{«")
 _SENTENCE_END = re.compile(r'(?<=[.?!])\s+')
 
 
+# ── Sentence-ending punctuation ──
+
+# Characters that qualify as sentence-ending punctuation
+_SENTENCE_ENDING = re.compile(r'[.?!…:;]$')
+
+
+def auto_add_sentence_punctuation(text: str) -> str:
+    """Add sentence-ending punctuation to text that has none.
+
+    When ``punctuate_speech`` is OFF (no spoken punctuation commands),
+    the transcription model may still output text without any punctuation
+    marks (especially the local Whisper model). This function ensures
+    every line of the text ends with a proper sentence-ending mark.
+
+    - If the text doesn't already end with ``. ? ! … : ;``, adds a period.
+    - Handles multi-line text, adding periods to lines that lack ending
+      punctuation.
+    - Preserves existing punctuation and formatting.
+
+    Args:
+        text: The transcribed text, possibly without ending punctuation.
+
+    Returns:
+        Text with sentence-ending punctuation added where missing.
+    """
+    if not text:
+        return text
+
+    # Normalize line endings
+    lines = text.split('\n')
+    result: list[str] = []
+    for line in lines:
+        stripped = line.rstrip()
+        if stripped and not _SENTENCE_ENDING.search(stripped):
+            stripped += '.'
+        result.append(stripped)
+
+    return '\n'.join(result)
+
+
 # ── Number Words ──
 
 # Maps spoken number words to their digit equivalents.

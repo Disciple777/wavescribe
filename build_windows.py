@@ -329,7 +329,7 @@ def create_installer_script():
 #define MyAppExeName "WaveScribe.exe"
 
 [Setup]
-AppId={{B8F4A3D2-1C5E-4A9B-8D6F-7E2C3A1B5D9F}}
+AppId={{{{B8F4A3D2-1C5E-4A9B-8D6F-7E2C3A1B5D9F}}}}
 AppName={{#MyAppName}}
 AppVersion={{#MyAppVersion}}
 AppPublisher={{#MyAppPublisher}}
@@ -343,7 +343,7 @@ LicenseFile=
 PrivilegesRequired=admin
 OutputDir={os.path.join(ROOT, "installer")}
 OutputBaseFilename=WaveScribe-Setup-{{#MyAppVersion}}
-SetupIconFile={os.path.join(ROOT, "assets", "icon.png")}
+SetupIconFile={os.path.join(ROOT, "assets", "icon.ico")}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -360,7 +360,7 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 Source: "{os.path.join(DIST_DIR, APP_NAME, "*")}"; DestDir: "{{app}}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{{groupprograms}}\\{{#MyAppName}}"; Filename: "{{app}}\\{{#MyAppExeName}}"
+Name: "{{group}}\\{{#MyAppName}}"; Filename: "{{app}}\\{{#MyAppExeName}}"
 Name: "{{autodesktop}}\\{{#MyAppName}}"; Filename: "{{app}}\\{{#MyAppExeName}}"; Tasks: desktopicon
 
 [Run]

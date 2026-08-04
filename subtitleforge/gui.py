@@ -44,6 +44,7 @@ from subtitleforge.srt_generator import (
     segments_to_vtt,
     estimate_subtitle_count,
 )
+from subtitleforge.post_processors import apply_postprocessing_pipeline
 
 # ── Color Constants (reuse WaveScribe theme) ──
 COLOR_BG = COLORS["bg"]
@@ -108,6 +109,7 @@ class SubtitleForgeApp(ctk.CTk):
         # ── State ──
         self._video_path: Optional[str] = None
         self._segments: List[Dict[str, Any]] = []
+        self._raw_segments: List[Dict[str, Any]] = []
         self._srt_content: str = ""
         self._config = load_config()
         self._api_key = self._config.get("api_key", "")
@@ -127,6 +129,7 @@ class SubtitleForgeApp(ctk.CTk):
         self._build_video_section()
         self._build_settings_section()
         self._build_progress_section()
+        self._build_post_processing_section()
         self._build_preview_section()
         self._build_action_buttons()
 
@@ -503,6 +506,128 @@ class SubtitleForgeApp(ctk.CTk):
         )
         self._progress_percent.pack(side="right")
 
+    def _build_post_processing_section(self) -> None:
+        """Post-processing toggles card — transformations applied live after transcription."""
+        card = ctk.CTkFrame(self._content, fg_color=COLOR_CARD, corner_radius=12)
+        card.pack(fill="x", padx=24, pady=(0, 12))
+
+        # Header
+        header = ctk.CTkFrame(card, fg_color="transparent")
+        header.pack(fill="x", padx=16, pady=(14, 10))
+
+        icon_label = ctk.CTkLabel(header, text="🎨", font=self._font_large)
+        icon_label.pack(side="left", padx=(0, 8))
+
+        title_label = ctk.CTkLabel(
+            header, text="Post-Processing",
+            font=self._font_body_bold, text_color=COLOR_TEXT,
+        )
+        title_label.pack(side="left")
+
+        # ── State vars ──
+        self._caps_var = ctk.BooleanVar(value=False)
+        self._lowercase_var = ctk.BooleanVar(value=False)
+        self._replace_accents_var = ctk.BooleanVar(value=False)
+        self._replace_enne_var = ctk.BooleanVar(value=False)
+        self._remove_punct_var = ctk.BooleanVar(value=False)
+
+        # Lock to prevent re-entrant callback loops when mutually-exclusive
+        # checkboxes uncheck each other programmatically.
+        self._post_lock = False
+
+        # ── Checkboxes grid (2 columns) ──
+        check_frame = ctk.CTkFrame(card, fg_color="transparent")
+        check_frame.pack(fill="x", padx=16, pady=(0, 8))
+
+        # Row 1: ALL CAPS  +  Replace accents
+        row1 = ctk.CTkFrame(check_frame, fg_color="transparent")
+        row1.pack(fill="x", pady=(0, 8))
+
+        self._caps_cb = ctk.CTkCheckBox(
+            row1,
+            text="ALL CAPS",
+            font=self._font_medium,
+            text_color=COLOR_TEXT,
+            fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOVER,
+            corner_radius=4,
+            variable=self._caps_var,
+            command=self._on_caps_toggle,
+        )
+        self._caps_cb.pack(side="left", padx=(0, 40))
+
+        self._replace_accents_cb = ctk.CTkCheckBox(
+            row1,
+            text="Replace accents (á → a)",
+            font=self._font_medium,
+            text_color=COLOR_TEXT,
+            fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOVER,
+            corner_radius=4,
+            variable=self._replace_accents_var,
+            command=self._on_other_post_toggle,
+        )
+        self._replace_accents_cb.pack(side="left")
+
+        # Row 2: all lowercase  +  Replace ñ → n
+        row2 = ctk.CTkFrame(check_frame, fg_color="transparent")
+        row2.pack(fill="x", pady=(0, 8))
+
+        self._lowercase_cb = ctk.CTkCheckBox(
+            row2,
+            text="all lowercase",
+            font=self._font_medium,
+            text_color=COLOR_TEXT,
+            fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOVER,
+            corner_radius=4,
+            variable=self._lowercase_var,
+            command=self._on_lowercase_toggle,
+        )
+        self._lowercase_cb.pack(side="left", padx=(0, 40))
+
+        self._replace_enne_cb = ctk.CTkCheckBox(
+            row2,
+            text="Replace ñ → n",
+            font=self._font_medium,
+            text_color=COLOR_TEXT,
+            fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOVER,
+            corner_radius=4,
+            variable=self._replace_enne_var,
+            command=self._on_other_post_toggle,
+        )
+        self._replace_enne_cb.pack(side="left")
+
+        # Row 3: Remove punctuation (full width)
+        row3 = ctk.CTkFrame(check_frame, fg_color="transparent")
+        row3.pack(fill="x")
+
+        self._remove_punct_cb = ctk.CTkCheckBox(
+            row3,
+            text="Remove punctuation",
+            font=self._font_medium,
+            text_color=COLOR_TEXT,
+            fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOVER,
+            corner_radius=4,
+            variable=self._remove_punct_var,
+            command=self._on_other_post_toggle,
+        )
+        self._remove_punct_cb.pack(side="left")
+
+        # Hint
+        self._post_hint = ctk.CTkLabel(
+            card,
+            text="💡  Changes apply live to the preview.",
+            font=self._font_small,
+            text_color=COLOR_TEXT_DIM,
+        )
+        self._post_hint.pack(pady=(0, 14))
+
+        # Start disabled — enabled after first transcription
+        self._set_post_processors_enabled(False)
+
     def _build_preview_section(self) -> None:
         """SRT preview text area with syntax-style display."""
         card = ctk.CTkFrame(self._content, fg_color=COLOR_CARD, corner_radius=12)
@@ -867,45 +992,69 @@ class SubtitleForgeApp(ctk.CTk):
             mode = self._get_mode()
             language = self._get_language_code()
 
+            # For local mode, use "base" model; cloud uses "whisper-1"
+            model_name = "base" if mode == "local" else "whisper-1"
             segments = transcribe_audio_timed(
                 wav_bytes=wav_bytes,
                 api_key=self._api_key,
                 mode=mode,
+                model=model_name,
                 language=language,
             )
 
-            self._segments = segments
+            # Store raw (unprocessed) segments for live post-processing toggling
+            self._raw_segments = segments
             self.after(0, lambda: self._update_progress(
                 0.8,
                 f"✅  {len(segments)} segments transcribed.",
             ))
 
-            # Step 3: Generate SRT
+            # Step 3: Apply post-processing pipeline
+            processed = apply_postprocessing_pipeline(
+                segments,
+                caps=self._caps_var.get(),
+                lowercase=self._lowercase_var.get(),
+                replace_accents_enabled=self._replace_accents_var.get(),
+                replace_enne_enabled=self._replace_enne_var.get(),
+                remove_punct=self._remove_punct_var.get(),
+            )
+            self._segments = processed
+
+            # Step 4: Generate SRT from processed segments
             self.after(0, lambda: self._set_status("📝  Generating SRT subtitles..."))
             self.after(0, lambda: self._update_progress(0.9, "Formatting subtitles..."))
 
             max_words = round(self._words_slider.get())
-            srt_content = segments_to_srt(segments, max_words_per_block=max_words)
+            # Don't let _clean_segment_text re-capitalize if lowercase is active
+            cap_first = not self._lowercase_var.get()
+            srt_content = segments_to_srt(
+                processed, max_words_per_block=max_words,
+                capitalize_first=cap_first,
+            )
             self._srt_content = srt_content
 
-            # Step 4: Show in preview
-            self.after(0, lambda: self._show_preview(srt_content, len(segments)))
+            # Step 5: Show in preview
+            self.after(0, lambda: self._show_preview(srt_content, len(processed)))
             self.after(0, lambda: self._update_progress(1.0, "Done!"))
 
             self.after(0, lambda: self._set_status(
-                f"✅  Done! {len(segments)} subtitles generated. Click Save to export.",
+                f"✅  Done! {len(processed)} subtitles generated. Click Save to export.",
             ))
 
-            # Enable save buttons
+            # Enable save buttons & post-processing toggles
             self.after(0, lambda: self._save_srt_btn.configure(state="normal"))
             self.after(0, lambda: self._save_vtt_btn.configure(state="normal"))
+            self.after(0, lambda: self._set_post_processors_enabled(True))
 
         except AudioExtractionError as e:
-            self.after(0, lambda: self._show_error(f"Audio Extraction Error", str(e)))
+            err = str(e)
+            self.after(0, lambda e=err: self._show_error("Audio Extraction Error", e))
         except TranscriptionError as e:
-            self.after(0, lambda: self._show_error(f"Transcription Error", str(e)))
+            err = str(e)
+            self.after(0, lambda e=err: self._show_error("Transcription Error", e))
         except Exception as e:
-            self.after(0, lambda: self._show_error(
+            err = str(e)
+            self.after(0, lambda e=err: self._show_error(
                 "Unexpected Error",
                 f"An unexpected error occurred:\n{e}",
             ))
@@ -933,7 +1082,8 @@ class SubtitleForgeApp(ctk.CTk):
 
                 self.after(0, lambda: self._on_generate())
             except Exception as e:
-                self.after(0, lambda: self._show_error(
+                err = str(e)
+                self.after(0, lambda e=err: self._show_error(
                     "Installation Error",
                     f"Failed to install Whisper:\n{e}",
                 ))
@@ -942,6 +1092,100 @@ class SubtitleForgeApp(ctk.CTk):
 
         thread = threading.Thread(target=_install, daemon=True)
         thread.start()
+
+    # ── Post-Processing ──
+
+    def _set_post_processors_enabled(self, enabled: bool) -> None:
+        """Enable or disable all post-processing checkboxes."""
+        state = "normal" if enabled else "disabled"
+        for cb in (
+            self._caps_cb,
+            self._lowercase_cb,
+            self._replace_accents_cb,
+            self._replace_enne_cb,
+            self._remove_punct_cb,
+        ):
+            cb.configure(state=state)
+
+    def _on_caps_toggle(self) -> None:
+        """Handle ALL CAPS checkbox toggle — mutually exclusive with lowercase."""
+        if self._post_lock:
+            return
+        self._post_lock = True
+        try:
+            if self._caps_var.get():
+                self._lowercase_var.set(False)
+            self._refresh_post_processed_preview()
+        finally:
+            self._post_lock = False
+
+    def _on_lowercase_toggle(self) -> None:
+        """Handle lowercase checkbox toggle — mutually exclusive with ALL CAPS."""
+        if self._post_lock:
+            return
+        self._post_lock = True
+        try:
+            if self._lowercase_var.get():
+                self._caps_var.set(False)
+            self._refresh_post_processed_preview()
+        finally:
+            self._post_lock = False
+
+    def _on_other_post_toggle(self) -> None:
+        """Handle non-mutually-exclusive post-processing toggle (accents, ñ, punctuation)."""
+        if self._post_lock:
+            return
+        self._post_lock = True
+        try:
+            self._refresh_post_processed_preview()
+        finally:
+            self._post_lock = False
+
+    def _refresh_post_processed_preview(self) -> None:
+        """Re-apply post-processing pipeline and update the preview in-place.
+
+        Called whenever a post-processing checkbox is toggled.  Operates on
+        ``self._raw_segments`` so toggles are perfectly reversible.
+        """
+        if not self._raw_segments:
+            self._post_lock = False
+            return
+
+        processed = apply_postprocessing_pipeline(
+            self._raw_segments,
+            caps=self._caps_var.get(),
+            lowercase=self._lowercase_var.get(),
+            replace_accents_enabled=self._replace_accents_var.get(),
+            replace_enne_enabled=self._replace_enne_var.get(),
+            remove_punct=self._remove_punct_var.get(),
+        )
+        self._segments = processed
+
+        max_words = round(self._words_slider.get())
+        # Don't let _clean_segment_text re-capitalize if lowercase is active
+        cap_first = not self._lowercase_var.get()
+        srt_content = segments_to_srt(
+            processed, max_words_per_block=max_words,
+            capitalize_first=cap_first,
+        )
+        self._srt_content = srt_content
+
+        self._show_preview(srt_content, len(processed))
+
+        # Update status with active post-processing summary
+        active = []
+        if self._caps_var.get():
+            active.append("ALL CAPS")
+        elif self._lowercase_var.get():
+            active.append("lowercase")
+        if self._replace_accents_var.get():
+            active.append("no accents")
+        if self._replace_enne_var.get():
+            active.append("no ñ")
+        if self._remove_punct_var.get():
+            active.append("no punctuation")
+        if active:
+            self._set_status(f"✅  Post-processing: {', '.join(active)}")
 
     def _on_save_srt(self) -> None:
         """Save the generated SRT content to a file."""
@@ -1011,7 +1255,16 @@ class SubtitleForgeApp(ctk.CTk):
         """Clear the current session."""
         self._video_path = None
         self._segments = []
+        self._raw_segments = []
         self._srt_content = ""
+
+        # Reset post-processing checkboxes
+        self._caps_var.set(False)
+        self._lowercase_var.set(False)
+        self._replace_accents_var.set(False)
+        self._replace_enne_var.set(False)
+        self._remove_punct_var.set(False)
+        self._set_post_processors_enabled(False)
         self._clear_preview()
         self._file_name_label.configure(text="No video selected", text_color=COLOR_TEXT_DIM)
         self._file_details_label.configure(text="")

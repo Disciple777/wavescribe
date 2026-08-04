@@ -47,6 +47,7 @@ class AppState:
     punctuate_speech: bool = True
     auto_capitalize: bool = True
     numbers_as_digits: bool = False
+    local_language: str = "en"  # "en" for English, "auto" for auto-detect
     local_model_status: LocalModelStatus = LocalModelStatus.PACKAGE_MISSING
     last_transcription: str = ""
     error_message: str = ""
@@ -118,6 +119,16 @@ class AppState:
     def set_numbers_as_digits(self, enabled: bool) -> None:
         with self._lock:
             self.numbers_as_digits = enabled
+
+    # ── Local Language ──
+
+    def get_local_language(self) -> str:
+        with self._lock:
+            return self.local_language
+
+    def set_local_language(self, lang: str) -> None:
+        with self._lock:
+            self.local_language = lang
 
     # ── Local Model Status ──
 

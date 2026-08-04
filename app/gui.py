@@ -22,7 +22,7 @@ from app.transcriber import (
     setup_bundled_model,
     TranscriptionError,
 )
-from app.formatter import apply_punctuation, auto_capitalize, convert_numbers, clean_spacing, cleanup_redundant_punctuation
+from app.formatter import apply_punctuation, auto_capitalize, convert_numbers, clean_spacing, cleanup_redundant_punctuation, auto_add_sentence_punctuation
 from app.typer import type_text
 from app.config import load_config, save_config
 from app.overlay import StatusOverlay
@@ -156,6 +156,7 @@ class App(ctk.CTk):
         self.app_state.set_numbers_as_digits(self._config.get("numbers_as_digits", False))
         mode_str = self._config.get("mode", "cloud")
         self.app_state.set_mode(AppMode.CLOUD if mode_str == "cloud" else AppMode.LOCAL)
+        self.app_state.set_local_language(self._config.get("local_language", "en"))
 
         # Detect local model status — if config says ready but package is gone, reset
         cfg_status = self._config.get("local_model_status", "package_missing")
@@ -173,6 +174,7 @@ class App(ctk.CTk):
             "auto_capitalize": self.app_state.get_auto_capitalize(),
             "numbers_as_digits": self.app_state.get_numbers_as_digits(),
             "mode": mode.value,
+            "local_language": self.app_state.get_local_language(),
             "local_model_status": self.app_state.get_local_model_status().value,
         })
         save_config(self._config)
@@ -378,7 +380,7 @@ class App(ctk.CTk):
 
         # Insert button
         self.insert_btn = ctk.CTkButton(
-            card, text="📝  Insert into Window",
+            card, text="📝  Copy Text",
             font=FONTS["body"], height=36,
             fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
             text_color="#ffffff",
@@ -518,6 +520,43 @@ class App(ctk.CTk):
         )
         self.model_segmented.pack(fill="x", pady=(4, 0))
         self.model_segmented.set(self.app_state.get_model_size())
+
+        # ════════════════════════════════════════
+        # ── Local Language ──
+        # ════════════════════════════════════════
+        self._local_lang_frame = ctk.CTkFrame(card, fg_color="transparent")
+        # Note: packed/unpacked dynamically in _update_ui based on mode
+
+        ctk.CTkLabel(
+            self._local_lang_frame, text="Local Language",
+            font=FONTS["body_medium"], text_color=COLOR_TEXT_DIM
+        ).pack(anchor="w")
+
+        lang_label = ctk.CTkLabel(
+            self._local_lang_frame,
+            text="Choose the transcription language for the local model.",
+            font=FONTS["body_small"],
+            text_color=COLOR_TEXT_DIM,
+            anchor="w",
+            justify="left",
+        )
+        lang_label.pack(fill="x", pady=(4, 4))
+
+        self._local_lang_segmented = ctk.CTkSegmentedButton(
+            self._local_lang_frame,
+            values=["English (fast)", "Auto Detect"],
+            selected_color=COLOR_ACCENT,
+            selected_hover_color=COLOR_ACCENT_HOVER,
+            font=FONTS["body_medium"],
+            command=self._on_local_language_change,
+        )
+        self._local_lang_segmented.pack(fill="x")
+        # Set initial value based on state
+        current_lang = self.app_state.get_local_language()
+        if current_lang == "en":
+            self._local_lang_segmented.set("English (fast)")
+        else:
+            self._local_lang_segmented.set("Auto Detect")
 
         # ════════════════════════════════════════
         # ── Local Model Install ──
@@ -899,7 +938,8 @@ class App(ctk.CTk):
                         return
 
                     model_size = self.app_state.get_model_size()
-                    text = transcribe_local(wav_bytes, model_size)
+                    local_language = self.app_state.get_local_language()
+                    text = transcribe_local(wav_bytes, model_size, language=local_language)
 
                 # If transcription was cancelled, don't update UI
                 if self._transcription_cancelled:
@@ -911,13 +951,19 @@ class App(ctk.CTk):
                 # Apply smart formatting steps based on individual toggles
                 if self.app_state.get_punctuate_speech():
                     text = apply_punctuation(text)
-                    text = clean_spacing(text)
-                    text = cleanup_redundant_punctuation(text)
+                else:
+                    # When spoken punctuation is OFF, auto-add punctuation marks
+                    # so the text has proper sentence endings (especially important
+                    # for the local model which outputs no punctuation at all)
+                    text = auto_add_sentence_punctuation(text)
+                # Always clean spacing and redundant punctuation
+                text = clean_spacing(text)
+                text = cleanup_redundant_punctuation(text)
                 if self.app_state.get_auto_capitalize():
                     text = auto_capitalize(text)
                 if self.app_state.get_numbers_as_digits():
                     text = convert_numbers(text)
-                # Always clean up spacing
+                # Always clean up spacing (final pass)
                 text = clean_spacing(text)
 
                 # If auto-capitalize is OFF, lowercase the first letter
@@ -1088,6 +1134,12 @@ class App(ctk.CTk):
         """Handle numbers as digits toggle and persist immediately."""
         enabled = bool(self._numbers_switch.get())
         self.app_state.set_numbers_as_digits(enabled)
+        self._save_current_config()
+
+    def _on_local_language_change(self, value: str) -> None:
+        """Handle local language selection change and persist immediately."""
+        lang = "en" if value == "English (fast)" else "auto"
+        self.app_state.set_local_language(lang)
         self._save_current_config()
 
     def _on_save_shortcuts(self) -> None:
@@ -1294,6 +1346,12 @@ class App(ctk.CTk):
 
         # ── Local model install UI ──
         self._update_local_model_visibility()
+
+        # ── Local language visibility — only show in Local mode ──
+        if mode == AppMode.LOCAL:
+            self._local_lang_frame.pack(fill="x", padx=20, pady=(0, 12))
+        else:
+            self._local_lang_frame.pack_forget()
 
         # ── Overlay (floating status indicator) ──
         overlay_map = {

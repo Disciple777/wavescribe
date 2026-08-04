@@ -375,12 +375,13 @@ def load_whisper_model(model_size: str = "base") -> None:
     _whisper_model = whisper.load_model(model_size)
 
 
-def transcribe_local(wav_bytes: bytes, model_size: str = "base") -> str:
+def transcribe_local(wav_bytes: bytes, model_size: str = "base", language: str = "en") -> str:
     """Transcribe WAV audio using a local Whisper model.
 
     Args:
         wav_bytes: WAV file contents as bytes.
         model_size: Whisper model size to use (tiny / base / small).
+        language: Language code ("en", "es", etc.) or "auto" for auto-detect.
 
     Returns:
         Transcribed text string.
@@ -408,11 +409,14 @@ def transcribe_local(wav_bytes: bytes, model_size: str = "base") -> str:
             / 32768.0
         )
 
-        result = _whisper_model.transcribe(
-            audio_array,
-            language="en",       # faster than auto-detect
+        # Build kwargs — if language is "auto", omit it so Whisper auto-detects
+        kwargs: Dict[str, Any] = dict(
             task="transcribe",
         )
+        if language and language != "auto":
+            kwargs["language"] = language
+
+        result = _whisper_model.transcribe(audio_array, **kwargs)
 
         text = result.get("text", "").strip()
         if not text:

@@ -55,13 +55,22 @@ _MIN_SEGMENT_DURATION = 1.0
 _DEFAULT_MAX_WORDS_PER_BLOCK = 0
 
 
-def _clean_segment_text(text: str) -> str:
+def _clean_segment_text(text: str, capitalize_first: bool = True) -> str:
     """Clean and normalize segment text for subtitle display.
 
     - Strips leading/trailing whitespace
     - Removes leading/trailing punctuation artifacts
-    - Capitalizes first letter
+    - Optionally capitalizes first letter (``capitalize_first=True``)
     - Removes extra spaces
+
+    Args:
+        text: Raw segment text from Whisper.
+        capitalize_first: Whether to uppercase the first character.
+            Set to ``False`` when post-processing (e.g. lowercase)
+            has already determined the final casing.
+
+    Returns:
+        Cleaned text string.
     """
     if not text:
         return ""
@@ -75,8 +84,8 @@ def _clean_segment_text(text: str) -> str:
     # Collapse multiple spaces
     text = re.sub(r'\s+', ' ', text)
 
-    # Capitalize first letter
-    if text:
+    # Capitalize first letter (only if post-processing hasn't already set the case)
+    if capitalize_first and text:
         text = text[0].upper() + text[1:]
 
     return text.strip()
@@ -285,6 +294,7 @@ def segments_to_srt(
     split_long: bool = True,
     max_duration: float = _MAX_SEGMENT_DURATION,
     max_words_per_block: int = _DEFAULT_MAX_WORDS_PER_BLOCK,
+    capitalize_first: bool = True,
 ) -> str:
     """Convert Whisper timed segments to SRT subtitle content.
 
@@ -317,7 +327,7 @@ def segments_to_srt(
     # ── Build clean entries with minimum duration ──
     entries: List[Dict[str, Any]] = []
     for seg in processed:
-        text = _clean_segment_text(seg.get("text", ""))
+        text = _clean_segment_text(seg.get("text", ""), capitalize_first=capitalize_first)
         if not text:
             continue
 
@@ -364,6 +374,7 @@ def segments_to_vtt(
     segments: List[Dict[str, Any]],
     split_long: bool = True,
     max_words_per_block: int = _DEFAULT_MAX_WORDS_PER_BLOCK,
+    capitalize_first: bool = True,
 ) -> str:
     """Convert Whisper timed segments to WebVTT subtitle content.
 
@@ -377,6 +388,7 @@ def segments_to_vtt(
 
     srt_content = segments_to_srt(
         segments, split_long=split_long, max_words_per_block=max_words_per_block,
+        capitalize_first=capitalize_first,
     )
 
     # Replace SRT format with VTT
