@@ -7,9 +7,11 @@ and config persistence.
 
 import queue
 import threading
+from tkinter import messagebox
 from typing import Optional
 
 import customtkinter as ctk
+import pyperclip
 
 from app.state import AppState, AppStatus, AppMode, LocalModelStatus, EventQueue
 from app.audio_capture import AudioCapture, AudioCaptureError
@@ -21,10 +23,13 @@ from app.transcriber import (
     load_whisper_model,
     setup_bundled_model,
     TranscriptionError,
+    PUNCTUATION_PROMPT,
 )
 from app.formatter import apply_punctuation, auto_capitalize, convert_numbers, clean_spacing, cleanup_redundant_punctuation, auto_add_sentence_punctuation
 from app.typer import type_text
 from app.config import load_config, save_config
+from app.autostart import apply_autostart_setting
+from app.history import HistoryManager
 from app.overlay import StatusOverlay
 from app.hotkeys import HotkeyManager
 from app.sounds import init_sounds, play_start_sound, play_stop_sound
@@ -80,6 +85,9 @@ class App(ctk.CTk):
         self._apply_config_to_state()
         self._config_dirty = False
 
+        # ── Transcription history (persisted to history.json) ──
+        self._history = HistoryManager()
+
         # ── Copy bundled Whisper model to cache if needed ──
         # This ensures the model file is on disk without an extra download
         setup_bundled_model()
@@ -133,6 +141,7 @@ class App(ctk.CTk):
 
         self._build_control_card()
         self._build_transcription_card()
+        self._build_history_card()
         self._build_settings_card()
         self._build_footer()
 
@@ -141,6 +150,9 @@ class App(ctk.CTk):
 
         # ── Start polling event queue ──
         self._poll_queue()
+
+        # ── Start polling input level (live meter) ──
+        self._poll_input_level()
 
         # ── Update UI for initial state ──
         self._update_ui()
@@ -154,6 +166,8 @@ class App(ctk.CTk):
         self.app_state.set_punctuate_speech(self._config.get("punctuate_speech", True))
         self.app_state.set_auto_capitalize(self._config.get("auto_capitalize", True))
         self.app_state.set_numbers_as_digits(self._config.get("numbers_as_digits", False))
+        self.app_state.set_autostart_enabled(self._config.get("autostart", True))
+        self.app_state.set_history_enabled(self._config.get("history_enabled", True))
         mode_str = self._config.get("mode", "cloud")
         self.app_state.set_mode(AppMode.CLOUD if mode_str == "cloud" else AppMode.LOCAL)
         self.app_state.set_local_language(self._config.get("local_language", "en"))
@@ -176,6 +190,8 @@ class App(ctk.CTk):
             "mode": mode.value,
             "local_language": self.app_state.get_local_language(),
             "local_model_status": self.app_state.get_local_model_status().value,
+            "autostart": self.app_state.get_autostart_enabled(),
+            "history_enabled": self.app_state.get_history_enabled(),
         })
         save_config(self._config)
 
@@ -270,6 +286,42 @@ class App(ctk.CTk):
             text_color="#ffffff", corner_radius=6,
             command=self._on_cancel_transcription,
         )
+
+        # ── Input level meter (always visible, shows 0% when idle) ──
+        # The meter is always packed so there's no layout shift when
+        # recording starts/stops.  At rest it just shows an empty bar
+        # at 0% with a dark fill so it blends into the background.
+        self._meter_frame = ctk.CTkFrame(card, fg_color="transparent")
+        self._meter_frame.pack(fill="x", padx=0, pady=0)
+
+        self._meter_row = ctk.CTkFrame(self._meter_frame, fg_color="transparent")
+
+        ctk.CTkLabel(
+            self._meter_row, text="🎙️  Input",
+            font=FONTS["body_small"], text_color=COLOR_TEXT_DIM,
+            anchor="w",
+        ).pack(side="left")
+
+        self._meter_bar = ctk.CTkProgressBar(
+            self._meter_row,
+            mode="determinate",
+            height=10,
+            corner_radius=5,
+            fg_color=COLOR_INPUT_BG,
+            progress_color=COLOR_INPUT_BG,  # dark fill blends in when idle
+        )
+        self._meter_bar.pack(side="left", fill="x", expand=True, padx=(8, 8))
+        self._meter_bar.set(0)
+
+        self._meter_label = ctk.CTkLabel(
+            self._meter_row, text="0%",
+            font=FONTS["body_small"], text_color=COLOR_TEXT_DIM,
+            anchor="e", width=44,
+        )
+        self._meter_label.pack(side="right")
+
+        # Always visible so the layout never shifts
+        self._meter_row.pack(fill="x", padx=20, pady=(0, 8))
 
         # ── Mode toggle ──
         mode_frame = ctk.CTkFrame(card, fg_color="transparent")
@@ -390,6 +442,148 @@ class App(ctk.CTk):
         )
         self.insert_btn.pack(fill="x", padx=20, pady=(0, 16))
 
+    def _build_history_card(self) -> None:
+        """Build the transcription history card (open / copy / clear entries)."""
+        self._history_card = ctk.CTkFrame(
+            self._content_frame, fg_color=COLOR_CARD, corner_radius=10,
+            border_width=1, border_color=COLOR_BORDER,
+        )
+        self._history_card.pack(fill="x", padx=16, pady=(12, 0))
+
+        header_frame = ctk.CTkFrame(self._history_card, fg_color="transparent")
+        header_frame.pack(fill="x", padx=20, pady=(16, 8))
+
+        ctk.CTkLabel(
+            header_frame, text="📜 History",
+            font=FONTS["body_large_bold"], text_color=COLOR_TEXT
+        ).pack(side="left")
+
+        self._history_count_label = ctk.CTkLabel(
+            header_frame, text="",
+            font=FONTS["body_small"], text_color=COLOR_TEXT_DIM,
+        )
+        self._history_count_label.pack(side="left", padx=(8, 0))
+
+        self._history_clear_btn = ctk.CTkButton(
+            header_frame, text="🗑  Clear",
+            font=FONTS["body_small"], height=24, width=64,
+            fg_color="transparent", hover_color=COLOR_BORDER,
+            text_color=COLOR_TEXT_DIM, corner_radius=4,
+            state="disabled",
+            command=self._on_history_clear,
+        )
+        self._history_clear_btn.pack(side="right")
+
+        # Empty state hint (shown when there are no entries)
+        self._history_empty_label = ctk.CTkLabel(
+            self._history_card, text="No saved transcriptions yet.",
+            font=FONTS["body_small"], text_color=COLOR_TEXT_DIM,
+        )
+        self._history_empty_label.pack(fill="x", padx=20, pady=(0, 12))
+
+        # Scrollable list of entries
+        self._history_list = ctk.CTkScrollableFrame(
+            self._history_card, fg_color="transparent",
+            height=150, corner_radius=0,
+            scrollbar_button_color=COLOR_CARD,
+            scrollbar_button_hover_color=COLOR_BORDER,
+        )
+        self._history_list.pack(fill="x", padx=12, pady=(0, 12))
+
+        # Populate from disk
+        self._refresh_history()
+
+    def _refresh_history(self) -> None:
+        """Rebuild the history list from the HistoryManager (main thread only).
+
+        Skips rebuilding when nothing changed, so frequent UI updates
+        don't churn widgets or reset the scroll position.
+        """
+        entries = self._history.get_all()
+        signature = (len(entries), entries[0]["text"] if entries else None)
+        if signature == getattr(self, "_history_signature", None):
+            return
+        self._history_signature = signature
+
+        # Toggle between the empty hint and the scrollable list
+        if entries:
+            self._history_empty_label.pack_forget()
+            self._history_list.pack(fill="x", padx=12, pady=(0, 12))
+        else:
+            self._history_list.pack_forget()
+            self._history_empty_label.pack(fill="x", padx=20, pady=(0, 12))
+
+        # Rebuild rows
+        for w in self._history_list.winfo_children():
+            w.destroy()
+
+        for i, entry in enumerate(entries):
+            row = ctk.CTkFrame(self._history_list, fg_color="transparent")
+            row.pack(fill="x", pady=(2, 2))
+
+            first_line = entry["text"].strip().splitlines()[0] if entry["text"].strip() else ""
+            display = first_line if len(first_line) <= 56 else first_line[:56] + "…"
+
+            ctk.CTkLabel(
+                row, text=f"{entry['timestamp']}  {display}",
+                font=FONTS["body_small"], text_color=COLOR_TEXT,
+                anchor="w",
+            ).pack(side="left", fill="x", expand=True)
+
+            copy_btn = ctk.CTkButton(
+                row, text="📋", width=30, height=24,
+                font=FONTS["body_small"],
+                fg_color=COLOR_INPUT_BG, hover_color=COLOR_BORDER,
+                text_color=COLOR_TEXT, corner_radius=4,
+                command=lambda i=i: self._on_history_copy(i),
+            )
+            copy_btn.pack(side="right", padx=(4, 0))
+
+            open_btn = ctk.CTkButton(
+                row, text="Open", width=52, height=24,
+                font=FONTS["body_small"],
+                fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
+                text_color="#ffffff", corner_radius=4,
+                command=lambda i=i: self._on_history_open(i),
+            )
+            open_btn.pack(side="right", padx=(4, 0))
+
+        self._history_count_label.configure(text=f"{len(entries)} saved")
+        self._history_clear_btn.configure(state="normal" if entries else "disabled")
+
+    def _on_history_open(self, index: int) -> None:
+        """Load a history entry into the transcription box."""
+        entry = self._history.get(index)
+        if entry:
+            self.app_state.set_last_transcription(entry["text"])
+            self._update_ui()
+
+    def _on_history_copy(self, index: int) -> None:
+        """Copy a history entry to the clipboard with brief feedback."""
+        entry = self._history.get(index)
+        if entry:
+            try:
+                pyperclip.copy(entry["text"])
+            except Exception:
+                # Clipboard unavailable (e.g. locked by another app) — skip quietly
+                return
+            self._history_count_label.configure(text="✓ copied to clipboard")
+            self.after(
+                1500,
+                lambda: self._history_count_label.configure(
+                    text=f"{self._history.count()} saved"
+                ),
+            )
+
+    def _on_history_clear(self) -> None:
+        """Clear all history entries after confirmation."""
+        if not messagebox.askyesno(
+            "Clear History", "Clear all saved transcriptions?"
+        ):
+            return
+        self._history.clear()
+        self._refresh_history()
+
     def _build_settings_card(self) -> None:
         """Build the settings panel with shortcut customization, model, API key, formatting."""
         card = ctk.CTkFrame(
@@ -397,6 +591,8 @@ class App(ctk.CTk):
             border_width=1, border_color=COLOR_BORDER,
         )
         card.pack(fill="x", padx=16, pady=(12, 0))
+        # Keep a reference so _update_ui can re-order the History card before it
+        self._settings_card = card
 
         # Header
         header_frame = ctk.CTkFrame(card, fg_color="transparent")
@@ -712,13 +908,68 @@ class App(ctk.CTk):
         else:
             self._numbers_switch.deselect()
 
+        # ════════════════════════════════════════
+        # ── General ──
+        # ════════════════════════════════════════
+        general_frame = ctk.CTkFrame(card, fg_color="transparent")
+        general_frame.pack(fill="x", padx=20, pady=(0, 16))
+
+        ctk.CTkLabel(
+            general_frame, text="General",
+            font=FONTS["body_medium"], text_color=COLOR_TEXT_DIM
+        ).pack(anchor="w")
+
+        # --- Start with Windows ---
+        autostart_frame = ctk.CTkFrame(general_frame, fg_color="transparent")
+        autostart_frame.pack(fill="x", pady=(4, 0))
+
+        ctk.CTkLabel(
+            autostart_frame, text="🪟  Start WaveScribe automatically with Windows",
+            font=FONTS["body_small"], text_color=COLOR_TEXT,
+            anchor="w",
+        ).pack(side="left")
+
+        self._autostart_switch = ctk.CTkSwitch(
+            autostart_frame, text="",
+            font=FONTS["body_small"],
+            progress_color=COLOR_ACCENT,
+            command=self._on_autostart_toggle,
+        )
+        self._autostart_switch.pack(side="right")
+        if self.app_state.get_autostart_enabled():
+            self._autostart_switch.select()
+        else:
+            self._autostart_switch.deselect()
+
+        # --- Save transcription history ---
+        history_frame = ctk.CTkFrame(general_frame, fg_color="transparent")
+        history_frame.pack(fill="x", pady=(4, 0))
+
+        ctk.CTkLabel(
+            history_frame, text="📜  Save transcription history",
+            font=FONTS["body_small"], text_color=COLOR_TEXT,
+            anchor="w",
+        ).pack(side="left")
+
+        self._history_switch = ctk.CTkSwitch(
+            history_frame, text="",
+            font=FONTS["body_small"],
+            progress_color=COLOR_ACCENT,
+            command=self._on_history_toggle,
+        )
+        self._history_switch.pack(side="right")
+        if self.app_state.get_history_enabled():
+            self._history_switch.select()
+        else:
+            self._history_switch.deselect()
+
     def _build_footer(self) -> None:
         """Build the app footer."""
         footer_frame = ctk.CTkFrame(self._content_frame, fg_color="transparent")
         footer_frame.pack(fill="x", padx=16, pady=(12, 16))
 
         ctk.CTkLabel(
-            footer_frame, text="WaveScribe v0.1.0",
+            footer_frame, text="WaveScribe v1.3",
             font=FONTS["body_small"], text_color=COLOR_TEXT_DIM
         ).pack()
 
@@ -871,6 +1122,37 @@ class App(ctk.CTk):
             if self.app_state.get_status() == AppStatus.RECORDING:
                 self._stop_recording(auto_insert=True)
 
+    # ── Input Level Meter ──
+
+    def _poll_input_level(self) -> None:
+        """Update the live input meter (polled every 50ms while recording)."""
+        status = self.app_state.get_status()
+        if status == AppStatus.RECORDING:
+            level = self.audio.get_input_level()
+            # Colour shifts green → yellow → red as the input gets louder
+            if level < 0.55:
+                color = COLOR_GREEN
+            elif level < 0.8:
+                color = COLOR_YELLOW
+            else:
+                color = COLOR_RED
+            self._meter_bar.set(level)
+            self._meter_bar.configure(progress_color=color)
+            self._meter_label.configure(text=f"{round(level * 100)}%")
+            # Update the floating overlay bar too
+            self._overlay.set_level(level, color)
+            self._previously_recording = True
+        else:
+            # Reset the bar once when transitioning from recording → idle,
+            # so we don't spam 20 widget updates per second forever.
+            if getattr(self, '_previously_recording', False):
+                self._previously_recording = False
+                self._overlay.set_level(0.0, COLOR_GREEN)
+                self._meter_bar.set(0)
+                self._meter_bar.configure(progress_color=COLOR_INPUT_BG)
+                self._meter_label.configure(text="0%")
+        self.after(50, self._poll_input_level)
+
     # ── Action Handlers ──
 
     def _on_record_click(self) -> None:
@@ -914,6 +1196,17 @@ class App(ctk.CTk):
 
                 # Check formatting setting
                 mode = self.app_state.get_mode()
+                # When "punctuation via speech" is OFF, hand punctuation over to
+                # the model by guiding it with a punctuated example prompt. This
+                # keeps the output consistently punctuated instead of sometimes
+                # having the model emit punctuation and sometimes not.
+                punctuation_prompt = None
+                if not self.app_state.get_punctuate_speech():
+                    # Skip the style prompt when auto-detecting the language, so
+                    # the English example can't bias language detection.
+                    local_lang = self.app_state.get_local_language()
+                    if mode == AppMode.CLOUD or local_lang == "en":
+                        punctuation_prompt = PUNCTUATION_PROMPT
                 if mode == AppMode.CLOUD:
                     api_key = self.app_state.get_api_key()
                     if not api_key:
@@ -926,7 +1219,7 @@ class App(ctk.CTk):
                         self.after(0, self._update_ui)
                         return
 
-                    text = transcribe_cloud(wav_bytes, api_key)
+                    text = transcribe_cloud(wav_bytes, api_key, prompt=punctuation_prompt)
                 else:
                     local_status = self.app_state.get_local_model_status()
                     if local_status != LocalModelStatus.READY:
@@ -939,7 +1232,10 @@ class App(ctk.CTk):
 
                     model_size = self.app_state.get_model_size()
                     local_language = self.app_state.get_local_language()
-                    text = transcribe_local(wav_bytes, model_size, language=local_language)
+                    text = transcribe_local(
+                        wav_bytes, model_size,
+                        language=local_language, initial_prompt=punctuation_prompt,
+                    )
 
                 # If transcription was cancelled, don't update UI
                 if self._transcription_cancelled:
@@ -972,6 +1268,9 @@ class App(ctk.CTk):
                     text = text[0].lower() + text[1:]
 
                 self.app_state.set_last_transcription(text)
+                # Save to transcription history (if enabled)
+                if self.app_state.get_history_enabled():
+                    self._history.add(text)
                 self.app_state.set_status(AppStatus.IDLE)
                 # Schedule UI update on main thread
                 self.after(0, self._update_ui)
@@ -1136,6 +1435,26 @@ class App(ctk.CTk):
         self.app_state.set_numbers_as_digits(enabled)
         self._save_current_config()
 
+    def _on_autostart_toggle(self) -> None:
+        """Apply the start-with-Windows setting to the registry and persist."""
+        enabled = bool(self._autostart_switch.get())
+        if apply_autostart_setting(enabled):
+            self.app_state.set_autostart_enabled(enabled)
+            self._save_current_config()
+        else:
+            # Registry write failed — revert the switch to the actual state
+            if enabled:
+                self._autostart_switch.deselect()
+            else:
+                self._autostart_switch.select()
+
+    def _on_history_toggle(self) -> None:
+        """Handle history toggle and persist immediately."""
+        enabled = bool(self._history_switch.get())
+        self.app_state.set_history_enabled(enabled)
+        self._save_current_config()
+        self._update_ui()
+
     def _on_local_language_change(self, value: str) -> None:
         """Handle local language selection change and persist immediately."""
         lang = "en" if value == "English (fast)" else "auto"
@@ -1291,6 +1610,9 @@ class App(ctk.CTk):
         else:
             self._cancel_transcribe_btn.pack_forget()
 
+        # ── Input level meter — always visible, no layout shift ──
+        # (the meter_row is packed once during build and never moved)
+
         # ── Buttons ──
         # Determine if Record should be enabled (Cloud needs API key, Local always ok)
         mode = self.app_state.get_mode()
@@ -1352,6 +1674,15 @@ class App(ctk.CTk):
             self._local_lang_frame.pack(fill="x", padx=20, pady=(0, 12))
         else:
             self._local_lang_frame.pack_forget()
+
+        # ── History card visibility — hidden when history is disabled ──
+        if self.app_state.get_history_enabled():
+            self._history_card.pack(
+                fill="x", padx=16, pady=(12, 0), before=self._settings_card
+            )
+            self._refresh_history()
+        else:
+            self._history_card.pack_forget()
 
         # ── Overlay (floating status indicator) ──
         overlay_map = {

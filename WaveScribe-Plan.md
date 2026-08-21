@@ -64,13 +64,13 @@ These are locked in based on your priorities:
 
 ### Nice-to-Have (Future)
 
-- [ ] Audio level meter during recording (CustomTkinter progress bar)
-- [ ] Customizable hotkeys
+- [x] Audio level meter during recording (CustomTkinter progress bar)
+- [x] Customizable hotkeys
 - [ ] Coding mode (spoken symbols → code syntax)
-- [ ] Auto-start with Windows (registry entry)
-- [ ] Local Whisper model (offline via `whisper-openai` or `whisper.cpp`)
-- [ ] Multiple language support
-- [ ] Transcription history
+- [x] Auto-start with Windows (registry entry)
+- [x] Local Whisper model (offline via `whisper-openai` or `whisper.cpp`)
+- [x] Multiple language support
+- [x] Transcription history
 
 ---
 
@@ -376,7 +376,7 @@ def create_tray(show_callback, quit_callback):
 │ │ Smart Formatting: [========O  ]     │ │  ← Switch/toggle
 │ └──────────────────────────────────────┘ │
 ├──────────────────────────────────────────┤
-│           WaveScribe v0.1.0              │  ← Footer
+│           WaveScribe v1.3              │  ← Footer
 └──────────────────────────────────────────┘
 ```
 
@@ -522,7 +522,7 @@ CustomTkinter's default dark theme looks like this (conceptually):
  │ │                                      │ │
  │ │ Smart Formatting  [=========O ]     │ │
  │ └──────────────────────────────────────┘ │
- │              WaveScribe v0.1.0           │
+ │              WaveScribe v1.3           │
  └──────────────────────────────────────────┘
 ```
 

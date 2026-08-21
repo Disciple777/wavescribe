@@ -29,9 +29,16 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "local_model_status": "ready",  # models are bundled or auto-downloaded
     "hotkey_start": "ctrl+shift+r",
     "hotkey_stop": "ctrl+shift+s",
+    "autostart": True,  # launch WaveScribe automatically when Windows starts
+    "history_enabled": True,  # save dictations to the transcription history
 }
 
 CONFIG_FILENAME = "config.json"
+
+
+def get_config_dir() -> str:
+    """Public alias for the config directory (used by history, etc.)."""
+    return _get_config_dir()
 
 
 def _get_config_dir() -> str:

@@ -18,6 +18,7 @@ from app.state import AppState, create_event_queue, AppStatus
 from app.audio_capture import AudioCapture
 from app.hotkeys import HotkeyManager
 from app.config import load_config
+from app.autostart import apply_autostart_setting, is_autostart_enabled
 from app.tray import create_tray
 from app.gui import App
 
@@ -36,6 +37,15 @@ def main() -> None:
 
     # ── Load saved config ──
     config = load_config()
+
+    # ── Reconcile auto-start with the saved setting ──
+    # Keeps the HKCU Run key in sync with the config: if the user enabled
+    # "Start with Windows" (default), ensure the registry entry exists;
+    # if they disabled it, make sure it's removed. Only writes to the
+    # registry when the actual state differs from the desired state.
+    desired_autostart = config.get("autostart", True)
+    if is_autostart_enabled() != desired_autostart:
+        apply_autostart_setting(desired_autostart)
 
     # ── Start hotkey listener (daemon thread) ──
     hotkey_mgr = HotkeyManager(event_queue)

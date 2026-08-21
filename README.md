@@ -11,6 +11,10 @@ Record your microphone, get real-time AI transcription via OpenAI Whisper (cloud
 - **🎤 Dual transcription engine**: OpenAI Whisper API (cloud) or local `openai-whisper` model (offline-capable)
 - **⌨️ Global hotkeys**: Ctrl+Shift+R to start recording, Ctrl+Shift+S to stop & transcribe — works from any app
 - **📝 Smart formatting**: ~40 spoken punctuation commands (`"comma" → ","`, `"open paren" → "("`), auto-capitalization, numbers-as-digits conversion, redundant punctuation cleanup
+- **✨ Consistent punctuation**: When spoken punctuation is off, the AI is guided with a prompt so output stays uniformly punctuated
+- **🎚️ Live input meter**: Mic level shown in the window and in the floating recording overlay
+- **🪟 Auto-start with Windows**: Launch at login (on by default, toggle in Settings)
+- **📜 Transcription history**: Dictations auto-saved with timestamps — reopen, copy, or clear them
 - **📋 Clipboard paste**: Inserts text via Ctrl+V (clipboard-based, so Unicode/special chars work perfectly)
 - **🎯 Custom hotkey binding**: Capture any key combination through the UI
 - **🔊 Sound effects**: Rising/descending tones on start/stop recording
@@ -53,7 +57,7 @@ Record your microphone, get real-time AI transcription via OpenAI Whisper (cloud
 │ │ OpenAI API Key                 [Save]│ │
 │ │ Smart Formatting               ...   │ │
 │ └──────────────────────────────────────┘ │
-│              WaveScribe v0.1.0           │
+│              WaveScribe v1.3           │
 └──────────────────────────────────────────┘
 ```
 
@@ -97,6 +101,8 @@ You can set:
 - **Mode** (Cloud ↔ Local)
 - **Hotkeys** (start & stop)
 - **Formatting toggles** (punctuation via speech, auto-capitalize, numbers as digits)
+- **Auto-start with Windows** (on by default)
+- **Transcription history** (on by default)
 
 ---
 
@@ -158,6 +164,8 @@ wavescribe/
 │   ├── typer.py               # Clipboard-based text insertion (Ctrl+V)
 │   ├── hotkeys.py             # Global hotkey registration & management
 │   ├── overlay.py             # Floating status indicator (always-on-top)
+│   ├── autostart.py           # HKCU Run-key registry helpers (launch at login)
+│   ├── history.py             # Thread-safe transcription history (JSON)
 │   ├── sounds.py              # Synthesized start/stop sound effects
 │   ├── tray.py                # System tray icon + menu
 │   ├── theme.py               # Colors, bundled fonts (Poppins/Montserrat)
@@ -165,7 +173,10 @@ wavescribe/
 │
 ├── tests/
 │   ├── test_formatter.py      # 30+ unit tests for formatting pipeline
-│   └── test_audio_capture.py  # Init & error handling tests
+│   ├── test_audio_capture.py  # Init & error handling tests
+│   ├── test_history.py        # History add/get/clear/persist tests
+│   ├── test_autostart.py      # Registry helper tests (no registry writes)
+│   └── test_transcriber.py    # Cloud/local transcription prompt tests
 │
 ├── assets/
 │   ├── icon.png               # App icon
@@ -235,7 +246,7 @@ The build script:
 |----------|----------|------|
 | Executable folder | `dist/WaveScribe/` | ~1.5 GB (most of it is the bundled Whisper model + torch) |
 | Portable ZIP | `installer/WaveScribe-Portable.zip` | ~60-80 MB |
-| Installer | `installer/WaveScribe-Setup-v0.1.0.exe` | ~50-70 MB |
+| Installer | `installer/WaveScribe-Setup-v1.3.exe` | ~50-70 MB |
 
 ### Inno Setup Troubleshooting
 
@@ -339,11 +350,11 @@ they can reclaim **~2.5 GB**. They're pure build output, so development is unaff
 - [x] Config persistence
 - [x] PyInstaller packaging
 - [x] Inno Setup installer
-- [ ] Audio level meter during recording
+- [x] Audio level meter during recording
 - [ ] Coding mode (spoken symbols → code syntax)
-- [ ] Auto-start with Windows
-- [ ] Multiple language support
-- [ ] Transcription history
+- [x] Auto-start with Windows
+- [x] Multiple language support
+- [x] Transcription history
 
 ---
 

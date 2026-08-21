@@ -21,9 +21,11 @@ a = Analysis(
         # Core app modules
         "app",
         "app.audio_capture",
+        "app.autostart",
         "app.config",
         "app.formatter",
         "app.gui",
+        "app.history",
         "app.hotkeys",
         "app.overlay",
         "app.sounds",
@@ -71,6 +73,8 @@ a = Analysis(
         "win32file",
         "win32gui",
         "win32process",
+        # Windows auto-start (registry)
+        "winreg",
         # PyAutoGUI / typing
         "pyperclip",
         "pyautogui",

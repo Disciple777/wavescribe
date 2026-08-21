@@ -1,0 +1,22 @@
+# Readout dependencies.
+#
+# Most requirements are already installed in the project's root `.venv`
+# (shared with WaveScribe): keyboard, pyperclip, pyautogui, customtkinter,
+# pystray, Pillow. Install them with:
+#
+#   python -m venv .venv
+#   .venv\Scripts\pip install -r requirements.txt
+#
+# The only Readout-specific dependency is the optional Edge neural voice
+# engine. The offline Windows voices need nothing extra.
+
+# ── Required (shared with the root venv) ──
+keyboard==0.13.5
+pyperclip==1.11.0
+PyAutoGUI==0.9.54
+customtkinter==6.0.0
+pystray==0.19.5
+pillow==12.3.0
+
+# ── Optional: Edge neural voices (much more natural, requires internet) ──
+edge-tts==7.1.13

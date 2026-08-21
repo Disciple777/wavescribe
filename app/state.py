@@ -49,6 +49,8 @@ class AppState:
     numbers_as_digits: bool = False
     local_language: str = "en"  # "en" for English, "auto" for auto-detect
     local_model_status: LocalModelStatus = LocalModelStatus.PACKAGE_MISSING
+    autostart_enabled: bool = True  # launch with Windows
+    history_enabled: bool = True  # save dictations to history
     last_transcription: str = ""
     error_message: str = ""
 
@@ -139,6 +141,24 @@ class AppState:
     def set_local_model_status(self, status: LocalModelStatus) -> None:
         with self._lock:
             self.local_model_status = status
+
+    # ── General Options ──
+
+    def get_autostart_enabled(self) -> bool:
+        with self._lock:
+            return self.autostart_enabled
+
+    def set_autostart_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self.autostart_enabled = enabled
+
+    def get_history_enabled(self) -> bool:
+        with self._lock:
+            return self.history_enabled
+
+    def set_history_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self.history_enabled = enabled
 
     # ── Transcription ──
 

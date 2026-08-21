@@ -21,6 +21,17 @@ class TranscriptionError(Exception):
     pass
 
 
+# A sample of correctly punctuated dictation. When "punctuation via speech" is
+# OFF, this is passed to the transcription model (cloud "prompt" / local
+# "initial_prompt") so it consistently emits punctuation marks instead of
+# sometimes omitting them based on audio pauses.
+PUNCTUATION_PROMPT = (
+    "Hello, world! This is an example of properly punctuated dictation. "
+    "Every sentence ends with the correct punctuation mark. "
+    "Questions end with a question mark, and exclamations with an exclamation point."
+)
+
+
 # ── Timed transcription (shared with SubtitleForge) ──
 
 
@@ -255,13 +266,15 @@ def setup_bundled_model() -> bool:
 
 # ── Cloud mode ──
 
-def transcribe_cloud(wav_bytes: bytes, api_key: str, model: str = "whisper-1") -> str:
+def transcribe_cloud(wav_bytes: bytes, api_key: str, model: str = "whisper-1", prompt: str | None = None) -> str:
     """Send WAV audio to OpenAI Whisper API and return transcribed text.
 
     Args:
         wav_bytes: WAV file contents as bytes.
         api_key: OpenAI API key.
         model: Whisper model to use (default: whisper-1).
+        prompt: Optional text to guide the model's style. Passing a correctly
+            punctuated sample makes the model consistently emit punctuation.
 
     Returns:
         Transcribed text string.
@@ -286,11 +299,15 @@ def transcribe_cloud(wav_bytes: bytes, api_key: str, model: str = "whisper-1") -
         audio_file = io.BytesIO(wav_bytes)
         audio_file.name = "audio.wav"
 
-        transcript = client.audio.transcriptions.create(
+        kwargs: Dict[str, Any] = dict(
             model=model,
             file=audio_file,
             response_format="text",
         )
+        if prompt:
+            kwargs["prompt"] = prompt
+
+        transcript = client.audio.transcriptions.create(**kwargs)
 
         if not transcript or not transcript.strip():
             raise TranscriptionError(
@@ -375,13 +392,15 @@ def load_whisper_model(model_size: str = "base") -> None:
     _whisper_model = whisper.load_model(model_size)
 
 
-def transcribe_local(wav_bytes: bytes, model_size: str = "base", language: str = "en") -> str:
+def transcribe_local(wav_bytes: bytes, model_size: str = "base", language: str = "en", initial_prompt: str | None = None) -> str:
     """Transcribe WAV audio using a local Whisper model.
 
     Args:
         wav_bytes: WAV file contents as bytes.
         model_size: Whisper model size to use (tiny / base / small).
         language: Language code ("en", "es", etc.) or "auto" for auto-detect.
+        initial_prompt: Optional conditioning text. Passing a correctly
+            punctuated sample makes the model consistently emit punctuation.
 
     Returns:
         Transcribed text string.
@@ -415,6 +434,8 @@ def transcribe_local(wav_bytes: bytes, model_size: str = "base", language: str =
         )
         if language and language != "auto":
             kwargs["language"] = language
+        if initial_prompt:
+            kwargs["initial_prompt"] = initial_prompt
 
         result = _whisper_model.transcribe(audio_array, **kwargs)
 
