@@ -18,6 +18,13 @@ class AppStatus(Enum):
     ERROR = "error"
 
 
+class TTSReadStatus(Enum):
+    """Status for the Read Out TTS feature."""
+    IDLE = "idle"
+    READING = "reading"
+    ERROR = "error"
+
+
 class AppMode(Enum):
     LOCAL = "local"
     CLOUD = "cloud"
@@ -53,6 +60,11 @@ class AppState:
     history_enabled: bool = True  # save dictations to history
     last_transcription: str = ""
     error_message: str = ""
+
+    # ── TTS (Read Out) state ──
+    tts_status: TTSReadStatus = TTSReadStatus.IDLE
+    tts_error_message: str = ""
+    tts_last_text: str = ""
 
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -185,6 +197,38 @@ class AppState:
             self.error_message = ""
             if self.status == AppStatus.ERROR:
                 self.status = AppStatus.IDLE
+
+    # ── TTS (Read Out) state ──
+
+    def get_tts_status(self) -> TTSReadStatus:
+        with self._lock:
+            return self.tts_status
+
+    def set_tts_status(self, status: TTSReadStatus) -> None:
+        with self._lock:
+            self.tts_status = status
+
+    def get_tts_error_message(self) -> str:
+        with self._lock:
+            return self.tts_error_message
+
+    def set_tts_error_message(self, msg: str) -> None:
+        with self._lock:
+            self.tts_error_message = msg
+
+    def clear_tts_error(self) -> None:
+        with self._lock:
+            self.tts_error_message = ""
+            if self.tts_status == TTSReadStatus.ERROR:
+                self.tts_status = TTSReadStatus.IDLE
+
+    def get_tts_last_text(self) -> str:
+        with self._lock:
+            return self.tts_last_text
+
+    def set_tts_last_text(self, text: str) -> None:
+        with self._lock:
+            self.tts_last_text = text
 
     # ── Helper ──
 

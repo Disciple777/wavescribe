@@ -31,6 +31,18 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "hotkey_stop": "ctrl+shift+s",
     "autostart": True,  # launch WaveScribe automatically when Windows starts
     "history_enabled": True,  # save dictations to the transcription history
+    # ── Microphone selection ──
+    "input_device": "default",  # "default" or a sounddevice device index
+    # ── Text-to-speech (Read Out) settings ──
+    "tts_backend": "system",        # "system" (offline) | "edge" (neural, online)
+    "tts_system_voice": "",         # "" = Windows default voice
+    "tts_edge_voice": "en-US-AriaNeural",
+    "tts_rate_percent": 100,         # 50..150 (100 = normal speed)
+    "tts_volume": 100,               # 0..100
+    "tts_hotkey": "ctrl+alt+space",  # toggle: read selection / stop speaking
+    "tts_swap_voice_hotkey": "ctrl+alt+v",  # cycle through the voice list
+    "tts_voice_list": [],            # [{"backend": "system"|"edge", "voice": str}, …]
+    "tts_active_voice_index": 0,     # pointer into tts_voice_list
 }
 
 CONFIG_FILENAME = "config.json"

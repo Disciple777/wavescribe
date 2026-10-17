@@ -1,0 +1,5 @@
+cd C:\Users\CPU\Documents\Programas\codex\wavescribe 
+.venv\Scripts\activate
+python main.py
+
+Create Installer (25/7/26 TG) cd C:\\Users\\CPU\\Documents\\Programas\\codex\\wavescribe .venv\\Scripts\\activate python build_windows.py --installer

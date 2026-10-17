@@ -14,6 +14,7 @@ from app.state import AppState, create_event_queue, AppMode  # noqa: E402
 from app.audio_capture import AudioCapture  # noqa: E402
 from app.hotkeys import HotkeyManager  # noqa: E402
 from app.gui import App  # noqa: E402
+from app.tts_engine import EngineManager  # noqa: E402
 
 
 def _display_available() -> bool:
@@ -43,7 +44,8 @@ def test_gui_constructs_and_updates() -> None:
     audio = AudioCapture()
     hotkey_mgr = HotkeyManager(event_queue)
 
-    app = App(state, audio, event_queue, hotkey_mgr)
+    tts_engine = EngineManager()
+    app = App(state, audio, event_queue, hotkey_mgr, tts_engine)
 
     try:
         # Exercise the full UI update path a few times to catch widget-order bugs

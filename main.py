@@ -21,6 +21,7 @@ from app.config import load_config
 from app.autostart import apply_autostart_setting, is_autostart_enabled
 from app.tray import create_tray
 from app.gui import App
+from app.tts_engine import EngineManager
 
 
 def main() -> None:
@@ -47,11 +48,19 @@ def main() -> None:
     if is_autostart_enabled() != desired_autostart:
         apply_autostart_setting(desired_autostart)
 
+    # ── Initialize TTS engine ──
+    tts_engine = EngineManager(config.get("tts_backend", "system"))
+
     # ── Start hotkey listener (daemon thread) ──
     hotkey_mgr = HotkeyManager(event_queue)
     hotkey_mgr.set_hotkeys(
         config.get("hotkey_start", "ctrl+shift+r"),
         config.get("hotkey_stop", "ctrl+shift+s"),
+    )
+    # Register TTS hotkeys
+    hotkey_mgr.set_tts_hotkeys(
+        config.get("tts_hotkey", "ctrl+alt+space"),
+        config.get("tts_swap_voice_hotkey", "ctrl+alt+v"),
     )
 
     hotkey_thread = threading.Thread(
@@ -61,8 +70,8 @@ def main() -> None:
     )
     hotkey_thread.start()
 
-    # ── Create GUI (pass hotkey_mgr for dynamic updates) ──
-    app = App(state, audio, event_queue, hotkey_mgr)
+    # ── Create GUI (pass hotkey_mgr + tts_engine for dynamic updates) ──
+    app = App(state, audio, event_queue, hotkey_mgr, tts_engine)
 
     # ── System tray ──
     icon_path = os.path.join(project_root, "assets", "icon.png")

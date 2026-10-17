@@ -32,7 +32,7 @@ from app.autostart import apply_autostart_setting
 from app.history import HistoryManager
 from app.overlay import StatusOverlay
 from app.hotkeys import HotkeyManager
-from app.sounds import init_sounds, play_start_sound, play_stop_sound
+from app.sounds import init_sounds, play_start_sound, play_stop_sound, play_pressed_sound, play_tts_success_sound, play_tts_failure_sound
 from app.theme import (
     FONTS,
     init_fonts,
@@ -52,6 +52,12 @@ from app.theme import (
     COLOR_SUCCESS,
     COLOR_SUCCESS_HOVER,
 )
+from app.tts_engine import EngineManager, available_backends
+from app.tts_errors import TTSError
+from app import selection
+from app import voices as voices_mod
+from app.audio_capture import list_input_devices, get_device_display_name
+from app.state import TTSReadStatus
 
 # ── Window Dimensions ──
 
@@ -68,6 +74,7 @@ class App(ctk.CTk):
         audio: AudioCapture,
         event_queue: EventQueue,
         hotkey_mgr: HotkeyManager,
+        tts_engine: EngineManager,
     ):
         super().__init__()
 
@@ -79,6 +86,7 @@ class App(ctk.CTk):
         self.audio = audio
         self.event_queue = event_queue
         self.hotkey_mgr = hotkey_mgr
+        self.tts_engine = tts_engine
 
         # ── Load config and apply to state ──
         self._config = load_config()
@@ -108,12 +116,25 @@ class App(ctk.CTk):
         # ── Hotkey capture state ──
         self._capturing = False
         self._capturing_start: bool = False
+        self._tts_capturing = False
 
         # ── Guard to prevent double auto-insert ──
         self._auto_inserted = False
 
         # ── Flag to allow cancelling an in-progress transcription ──
         self._transcription_cancelled = False
+
+        # ── TTS state ──
+        self._tts_busy = False
+        self._tts_cancel_requested = False
+        self._tts_current_voices = []
+        self._tts_notice_voice_pending = False
+
+        # ── Apply TTS backend from config ──
+        tts_backend = self._config.get("tts_backend", "system")
+        if tts_backend not in available_backends():
+            tts_backend = "system"
+        self.tts_engine.set_backend(tts_backend)
 
         # ── Window setup ──
         self.title("WaveScribe")
@@ -131,19 +152,50 @@ class App(ctk.CTk):
         # ── Build UI ──
         self._build_header()
 
-        # Scrollable content area (everything below the header)
-        self._content_frame = ctk.CTkScrollableFrame(
+        # ── Tab switcher (Dictation / Read Out) ──
+        self._active_tab = "Dictation"
+        tab_frame = ctk.CTkFrame(self, fg_color=COLOR_CARD, height=40, corner_radius=0)
+        tab_frame.pack(fill="x", padx=0, pady=0)
+        tab_frame.pack_propagate(False)
+        self._tab_switcher = ctk.CTkSegmentedButton(
+            tab_frame,
+            values=["Dictation", "Read Out"],
+            selected_color=COLOR_ACCENT,
+            selected_hover_color=COLOR_ACCENT_HOVER,
+            font=FONTS["body_medium"],
+            command=self._on_tab_switch,
+        )
+        self._tab_switcher.pack(expand=True)
+        self._tab_switcher.set("Dictation")
+
+        # ── Dictation tab content (scrollable) ──
+        self._dictation_content = ctk.CTkScrollableFrame(
             self, fg_color=COLOR_BG, corner_radius=0,
             scrollbar_button_color=COLOR_CARD,
             scrollbar_button_hover_color=COLOR_BORDER,
         )
-        self._content_frame.pack(fill="both", expand=True, padx=0, pady=0)
 
         self._build_control_card()
         self._build_transcription_card()
         self._build_history_card()
         self._build_settings_card()
         self._build_footer()
+
+        # ── Read Out tab content (scrollable) ──
+        self._readout_content = ctk.CTkScrollableFrame(
+            self, fg_color=COLOR_BG, corner_radius=0,
+            scrollbar_button_color=COLOR_CARD,
+            scrollbar_button_hover_color=COLOR_BORDER,
+        )
+
+        self._build_tts_control_card()
+        self._build_tts_voice_card()
+        self._build_tts_speed_card()
+        self._build_tts_hotkey_card()
+        self._build_tts_footer()
+
+        # ── Show dictation tab by default ──
+        self._dictation_content.pack(fill="both", expand=True, padx=0, pady=0)
 
         # ── Global key-binding for hotkey capture ──
         self.bind('<KeyPress>', self._on_global_keypress)
@@ -156,6 +208,8 @@ class App(ctk.CTk):
 
         # ── Update UI for initial state ──
         self._update_ui()
+        # ── Populate TTS voice list for the active backend ──
+        self._tts_refresh_voices()
 
     # ── Config helpers ──
 
@@ -263,7 +317,7 @@ class App(ctk.CTk):
     def _build_control_card(self) -> None:
         """Build the control card (recording status, mode, buttons)."""
         card = ctk.CTkFrame(
-            self._content_frame, fg_color=COLOR_CARD, corner_radius=10,
+            self._dictation_content, fg_color=COLOR_CARD, corner_radius=10,
             border_width=1, border_color=COLOR_BORDER,
         )
         card.pack(fill="x", padx=16, pady=(16, 0))
@@ -390,7 +444,7 @@ class App(ctk.CTk):
     def _build_transcription_card(self) -> None:
         """Build the transcription display card."""
         card = ctk.CTkFrame(
-            self._content_frame, fg_color=COLOR_CARD, corner_radius=10,
+            self._dictation_content, fg_color=COLOR_CARD, corner_radius=10,
             border_width=1, border_color=COLOR_BORDER,
         )
         card.pack(fill="both", padx=16, pady=(12, 0), expand=True)
@@ -445,7 +499,7 @@ class App(ctk.CTk):
     def _build_history_card(self) -> None:
         """Build the transcription history card (open / copy / clear entries)."""
         self._history_card = ctk.CTkFrame(
-            self._content_frame, fg_color=COLOR_CARD, corner_radius=10,
+            self._dictation_content, fg_color=COLOR_CARD, corner_radius=10,
             border_width=1, border_color=COLOR_BORDER,
         )
         self._history_card.pack(fill="x", padx=16, pady=(12, 0))
@@ -587,7 +641,7 @@ class App(ctk.CTk):
     def _build_settings_card(self) -> None:
         """Build the settings panel with shortcut customization, model, API key, formatting."""
         card = ctk.CTkFrame(
-            self._content_frame, fg_color=COLOR_CARD, corner_radius=10,
+            self._dictation_content, fg_color=COLOR_CARD, corner_radius=10,
             border_width=1, border_color=COLOR_BORDER,
         )
         card.pack(fill="x", padx=16, pady=(12, 0))
@@ -792,6 +846,38 @@ class App(ctk.CTk):
         ).pack(fill="x", padx=20, pady=(8, 0))
 
         # ════════════════════════════════════════
+        # ── Microphone ──
+        # ════════════════════════════════════════
+        mic_frame = ctk.CTkFrame(card, fg_color="transparent")
+        mic_frame.pack(fill="x", padx=20, pady=(12, 12))
+
+        ctk.CTkLabel(
+            mic_frame, text="Microphone",
+            font=FONTS["body_medium"], text_color=COLOR_TEXT_DIM
+        ).pack(anchor="w")
+
+        self._mic_devices = list_input_devices()
+        self._mic_device_names = [d["name"] for d in self._mic_devices]
+        self._mic_device_ids = [d["id"] for d in self._mic_devices]
+
+        self._mic_menu = ctk.CTkOptionMenu(
+            mic_frame, values=self._mic_device_names,
+            font=FONTS["body_medium"], fg_color=COLOR_INPUT_BG,
+            button_color=COLOR_ACCENT, button_hover_color=COLOR_ACCENT_HOVER,
+            command=self._on_mic_changed,
+        )
+        self._mic_menu.pack(fill="x", pady=(4, 0))
+
+        # Set current selection from config
+        saved_device = self._config.get("input_device", "default")
+        if saved_device in self._mic_device_ids:
+            idx = self._mic_device_ids.index(saved_device)
+            self._mic_menu.set(self._mic_device_names[idx])
+        else:
+            self._mic_menu.set(self._mic_device_names[0])
+            self.audio.set_input_device("default")
+
+        # ════════════════════════════════════════
         # ── API Key ──
         # ════════════════════════════════════════
         api_frame = ctk.CTkFrame(card, fg_color="transparent")
@@ -965,7 +1051,7 @@ class App(ctk.CTk):
 
     def _build_footer(self) -> None:
         """Build the app footer."""
-        footer_frame = ctk.CTkFrame(self._content_frame, fg_color="transparent")
+        footer_frame = ctk.CTkFrame(self._dictation_content, fg_color="transparent")
         footer_frame.pack(fill="x", padx=16, pady=(12, 16))
 
         ctk.CTkLabel(
@@ -1009,6 +1095,11 @@ class App(ctk.CTk):
         to build the shortcut combo. Auto-finalizes when a valid
         modifier+key combination is detected.
         """
+        # Handle TTS hotkey capture
+        if self._tts_capturing:
+            self._on_tts_global_keypress(event)
+            return
+
         if not self._capturing:
             return
 
@@ -1091,6 +1182,38 @@ class App(ctk.CTk):
         # override this on Windows.
         self.focus_force()
 
+    def _on_tts_global_keypress(self, event) -> None:
+        """Handle keypress during TTS hotkey capture mode."""
+        if not self._tts_capturing:
+            return
+
+        keysym = event.keysym.lower()
+
+        if keysym in ("control_l", "control_r", "shift_l", "shift_r", "alt_l", "alt_r", "super_l", "super_r"):
+            return
+
+        if keysym == "escape":
+            self._tts_stop_capturing()
+            return
+
+        # Detect modifiers
+        mods = []
+        if event.state & 0x0004:
+            mods.append("ctrl")
+        if event.state & 0x0001:
+            mods.append("shift")
+        if event.state & 0x0008:
+            mods.append("alt")
+        if event.state & 0x0080:
+            mods.append("win")
+
+        if not mods:
+            return
+
+        key = self._TKINTER_KEY_MAP.get(keysym, keysym)
+        combo = "+".join(mods + [key])
+        self._tts_apply_hotkey(combo)
+
     def _stop_capturing(self) -> None:
         """Stop capture mode and reset UI."""
         self._capturing = False
@@ -1113,8 +1236,16 @@ class App(ctk.CTk):
 
         self.after(100, self._poll_queue)
 
-    def _handle_event(self, event: str) -> None:
+    def _handle_event(self, event) -> None:
         """Handle an event from the queue (from hotkeys or other threads)."""
+        # Route TTS events
+        if isinstance(event, str) and event in ("toggle_read", "cycle_voice"):
+            self._handle_tts_event(event)
+            return
+        if isinstance(event, tuple) and isinstance(event[0], str) and event[0].startswith("tts_"):
+            self._handle_tts_event(event)
+            return
+
         if event == "start_recording":
             if self.app_state.get_status() == AppStatus.IDLE:
                 self._start_recording()
@@ -1448,6 +1579,14 @@ class App(ctk.CTk):
             else:
                 self._autostart_switch.select()
 
+    def _on_mic_changed(self, display_name: str) -> None:
+        """Handle microphone device selection change."""
+        idx = self._mic_device_names.index(display_name) if display_name in self._mic_device_names else 0
+        device_id = self._mic_device_ids[idx]
+        self._config["input_device"] = device_id
+        self.audio.set_input_device(device_id)
+        self._save_current_config()
+
     def _on_history_toggle(self) -> None:
         """Handle history toggle and persist immediately."""
         enabled = bool(self._history_switch.get())
@@ -1694,3 +1833,899 @@ class App(ctk.CTk):
             self._overlay.update(label, color)
         else:
             self._overlay.hide()
+
+    # ═══════════════════════════════════════════════════════════
+    #  Tab switching
+    # ═══════════════════════════════════════════════════════════
+
+    def _on_tab_switch(self, tab_name: str) -> None:
+        """Switch between Dictation and Read Out tabs."""
+        if tab_name == self._active_tab:
+            return
+        self._active_tab = tab_name
+        if tab_name == "Dictation":
+            self._readout_content.pack_forget()
+            self._dictation_content.pack(fill="both", expand=True, padx=0, pady=0)
+        else:
+            self._dictation_content.pack_forget()
+            self._readout_content.pack(fill="both", expand=True, padx=0, pady=0)
+
+    # ═══════════════════════════════════════════════════════════
+    #  Read Out (TTS) tab — UI builders
+    # ═══════════════════════════════════════════════════════════
+
+    def _tts_card(self, parent=None) -> ctk.CTkFrame:
+        container = parent or self._readout_content
+        card = ctk.CTkFrame(
+            container, fg_color=COLOR_CARD, corner_radius=10,
+            border_width=1, border_color=COLOR_BORDER,
+        )
+        card.pack(fill="x", padx=16, pady=(10, 0))
+        return card
+
+    def _build_tts_control_card(self) -> None:
+        card = self._tts_card()
+        header = ctk.CTkFrame(card, fg_color="transparent")
+        header.pack(fill="x", padx=20, pady=(16, 4))
+
+        ctk.CTkLabel(
+            header, text="🔊  Read Out", font=FONTS["title"], text_color=COLOR_TEXT
+        ).pack(anchor="w")
+
+        ctk.CTkLabel(
+            card,
+            text="Select any text anywhere, press your hotkey, and listen.",
+            font=FONTS["body_small"], text_color=COLOR_TEXT_DIM, anchor="w",
+        ).pack(fill="x", padx=20, pady=(0, 16))
+
+        # ── Status row ──
+        status_row = ctk.CTkFrame(card, fg_color="transparent")
+        status_row.pack(fill="x", padx=20, pady=(0, 0))
+
+        self._tts_status_dot = ctk.CTkLabel(
+            status_row, text="●", font=FONTS["icon"], text_color=COLOR_GREEN, width=20,
+        )
+        self._tts_status_dot.pack(side="left")
+
+        self._tts_status_label = ctk.CTkLabel(
+            status_row, text="", font=FONTS["body"], text_color=COLOR_TEXT, anchor="w",
+        )
+        self._tts_status_label.pack(side="left", fill="x", expand=True, padx=(8, 8))
+
+        # ── Action buttons ──
+        buttons_row = ctk.CTkFrame(card, fg_color="transparent")
+        buttons_row.pack(fill="x", padx=20, pady=(14, 4))
+
+        self._tts_read_btn = ctk.CTkButton(
+            buttons_row, text="🔊  Read selected text", height=40,
+            font=FONTS["body_large"], fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOVER, corner_radius=8,
+            command=self._on_tts_read_selection,
+        )
+        self._tts_read_btn.pack(side="left", fill="x", expand=True)
+
+        self._tts_stop_btn = ctk.CTkButton(
+            buttons_row, text="⏹  Stop", height=40, width=92,
+            font=FONTS["body_large"], fg_color=COLOR_RED,
+            hover_color=COLOR_RED_HOVER, corner_radius=8,
+            state="disabled", command=self._on_tts_stop,
+        )
+        self._tts_stop_btn.pack(side="right", padx=(8, 0))
+
+        # ── Notice line ──
+        self._tts_notice_label = ctk.CTkLabel(
+            card, text="", font=FONTS["body_small"], text_color=COLOR_YELLOW,
+            anchor="w", wraplength=520,
+        )
+        self._tts_notice_label.pack(fill="x", padx=20, pady=(0, 4))
+
+        # ── Manual text box ──
+        ctk.CTkLabel(
+            card, text="…or paste text here to hear it:",
+            font=FONTS["body_small"], text_color=COLOR_TEXT_DIM, anchor="w",
+        ).pack(fill="x", padx=20, pady=(6, 0))
+
+        self._tts_text_box = ctk.CTkTextbox(
+            card, height=80, font=FONTS["body"], fg_color=COLOR_INPUT_BG,
+            border_width=1, border_color=COLOR_BORDER, corner_radius=8,
+            wrap="word",
+        )
+        self._tts_text_box.pack(fill="x", padx=20, pady=(4, 4))
+        self._tts_text_box.insert("1.0", "")
+
+        self._tts_speak_box_btn = ctk.CTkButton(
+            card, text="▶  Speak text", height=30,
+            font=FONTS["body_small"], fg_color=COLOR_GREEN,
+            hover_color=COLOR_GREEN_HOVER, text_color="#000000", corner_radius=6,
+            command=self._on_tts_speak_box,
+        )
+        self._tts_speak_box_btn.pack(fill="x", padx=20, pady=(0, 16))
+
+    def _build_tts_voice_card(self) -> None:
+        card = self._tts_card()
+        ctk.CTkLabel(
+            card, text="🗣  Voice", font=FONTS["body_large_bold"], text_color=COLOR_TEXT,
+        ).pack(anchor="w", padx=20, pady=(16, 6))
+
+        # ── Backend picker ──
+        backend_row = ctk.CTkFrame(card, fg_color="transparent")
+        backend_row.pack(fill="x", padx=20, pady=(0, 4))
+
+        ctk.CTkLabel(
+            backend_row, text="Engine", font=FONTS["body_small"], text_color=COLOR_TEXT_DIM,
+        ).pack(side="left")
+
+        self._tts_backend_options = [
+            (name, self.tts_engine.engine(name).display_name) for name in available_backends()
+        ]
+        self._tts_backend_menu = ctk.CTkOptionMenu(
+            backend_row, values=[d for _, d in self._tts_backend_options],
+            font=FONTS["body_small"], fg_color=COLOR_INPUT_BG,
+            button_color=COLOR_ACCENT, button_hover_color=COLOR_ACCENT_HOVER,
+            command=self._on_tts_backend_changed,
+        )
+        self._tts_backend_menu.pack(side="right")
+        current = self.tts_engine.get_backend()
+        current_display = next(d for n, d in self._tts_backend_options if n == current)
+        self._tts_backend_menu.set(current_display)
+
+        # ── Voice search ──
+        search_row = ctk.CTkFrame(card, fg_color="transparent")
+        search_row.pack(fill="x", padx=20, pady=(6, 0))
+
+        self._tts_voice_search = ctk.CTkEntry(
+            search_row, placeholder_text="🔍  Search voices (e.g. Spanish, Aria)…",
+            font=FONTS["body_small"], fg_color=COLOR_INPUT_BG,
+            border_width=1, border_color=COLOR_BORDER, corner_radius=6, height=28,
+        )
+        self._tts_voice_search.pack(side="left", fill="x", expand=True)
+        self._tts_voice_search.bind("<KeyRelease>", lambda _e: self._tts_on_voice_search())
+
+        self._tts_search_clear_btn = ctk.CTkButton(
+            search_row, text="✕", width=28, height=26,
+            font=FONTS["body_small"], fg_color="transparent",
+            hover_color=COLOR_BORDER, text_color=COLOR_TEXT_DIM, corner_radius=4,
+            command=self._tts_clear_voice_search,
+        )
+        self._tts_search_clear_btn.pack(side="right", padx=(6, 0))
+
+        # ── Voice picker ──
+        voice_row = ctk.CTkFrame(card, fg_color="transparent")
+        voice_row.pack(fill="x", padx=20, pady=(8, 4))
+
+        ctk.CTkLabel(
+            voice_row, text="⭐  Main voice", font=FONTS["body_small"], text_color=COLOR_TEXT_DIM,
+        ).pack(side="left")
+
+        self._tts_voice_menu = ctk.CTkOptionMenu(
+            voice_row, values=["(loading…)"],
+            font=FONTS["body_small"], fg_color=COLOR_INPUT_BG,
+            button_color=COLOR_ACCENT, button_hover_color=COLOR_ACCENT_HOVER,
+            command=self._on_tts_voice_changed,
+        )
+        self._tts_voice_menu.pack(side="right", fill="x", expand=True, padx=(12, 0))
+
+        self._tts_voices_state_label = ctk.CTkLabel(
+            card, text="", font=FONTS["body_small"], text_color=COLOR_TEXT_DIM, anchor="w",
+        )
+        self._tts_voices_state_label.pack(fill="x", padx=20, pady=(0, 8))
+
+        # ── Secondary voices ──
+        ctk.CTkLabel(
+            card, text="🔁  Voice list — press Cycle or the swap hotkey to swap",
+            font=FONTS["body_small"], text_color=COLOR_TEXT_DIM, anchor="w",
+        ).pack(fill="x", padx=20, pady=(0, 4))
+
+        self._tts_secondary_rows_frame = ctk.CTkFrame(card, fg_color="transparent")
+        self._tts_secondary_rows_frame.pack(fill="x", padx=20, pady=(0, 4))
+
+        add_row = ctk.CTkFrame(card, fg_color="transparent")
+        add_row.pack(fill="x", padx=20, pady=(0, 8))
+
+        self._tts_add_menu = ctk.CTkOptionMenu(
+            add_row, values=["(no voices)"], width=0,
+            font=FONTS["body_small"], fg_color=COLOR_INPUT_BG,
+            button_color=COLOR_ACCENT, button_hover_color=COLOR_ACCENT_HOVER,
+        )
+        self._tts_add_menu.pack(side="left", fill="x", expand=True)
+
+        self._tts_add_btn = ctk.CTkButton(
+            add_row, text="＋  Add voice", height=26, width=110,
+            font=FONTS["body_small"], fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOVER, corner_radius=6,
+            command=self._on_tts_add_secondary,
+        )
+        self._tts_add_btn.pack(side="right", padx=(8, 0))
+
+        self._tts_cycle_btn = ctk.CTkButton(
+            card, text="🔁  Cycle voice", height=32,
+            font=FONTS["body_small"], fg_color=COLOR_GREEN,
+            hover_color=COLOR_GREEN_HOVER, text_color="#000000", corner_radius=6,
+            command=self._on_tts_cycle_voice,
+        )
+        self._tts_cycle_btn.pack(fill="x", padx=20, pady=(0, 16))
+
+    def _build_tts_speed_card(self) -> None:
+        card = self._tts_card()
+
+        # ── Speed ──
+        speed_row = ctk.CTkFrame(card, fg_color="transparent")
+        speed_row.pack(fill="x", padx=20, pady=(14, 0))
+        ctk.CTkLabel(
+            speed_row, text="Speed", font=FONTS["body_small"], text_color=COLOR_TEXT_DIM,
+        ).pack(side="left")
+        self._tts_rate_value_label = ctk.CTkLabel(
+            speed_row, text="100%", font=FONTS["body_small"], text_color=COLOR_TEXT,
+            width=48, anchor="e",
+        )
+        self._tts_rate_value_label.pack(side="right")
+
+        self._tts_rate_slider = ctk.CTkSlider(
+            card, from_=50, to=150, number_of_steps=20,
+            progress_color=COLOR_ACCENT, button_color=COLOR_ACCENT,
+            button_hover_color=COLOR_ACCENT_HOVER, command=self._on_tts_rate_changed,
+        )
+        self._tts_rate_slider.pack(fill="x", padx=20, pady=(4, 4))
+        self._tts_rate_slider.set(self._config.get("tts_rate_percent", 100))
+
+        # ── Volume ──
+        volume_row = ctk.CTkFrame(card, fg_color="transparent")
+        volume_row.pack(fill="x", padx=20, pady=(10, 0))
+        ctk.CTkLabel(
+            volume_row, text="Volume", font=FONTS["body_small"], text_color=COLOR_TEXT_DIM,
+        ).pack(side="left")
+        self._tts_volume_value_label = ctk.CTkLabel(
+            volume_row, text="100", font=FONTS["body_small"], text_color=COLOR_TEXT,
+            width=48, anchor="e",
+        )
+        self._tts_volume_value_label.pack(side="right")
+
+        self._tts_volume_slider = ctk.CTkSlider(
+            card, from_=0, to=100, number_of_steps=20,
+            progress_color=COLOR_ACCENT, button_color=COLOR_ACCENT,
+            button_hover_color=COLOR_ACCENT_HOVER, command=self._on_tts_volume_changed,
+        )
+        self._tts_volume_slider.pack(fill="x", padx=20, pady=(4, 16))
+        self._tts_volume_slider.set(self._config.get("tts_volume", 100))
+
+    def _build_tts_hotkey_card(self) -> None:
+        card = self._tts_card()
+        ctk.CTkLabel(
+            card, text="⌨  Hotkey", font=FONTS["body_large_bold"], text_color=COLOR_TEXT,
+        ).pack(anchor="w", padx=20, pady=(16, 4))
+
+        ctk.CTkLabel(
+            card,
+            text="Select text anywhere, then press this shortcut to read it aloud. "
+                 "Press it again to stop.",
+            font=FONTS["body_small"], text_color=COLOR_TEXT_DIM, anchor="w", wraplength=520,
+        ).pack(fill="x", padx=20, pady=(0, 6))
+
+        hotkey_row = ctk.CTkFrame(card, fg_color="transparent")
+        hotkey_row.pack(fill="x", padx=20, pady=(0, 6))
+
+        self._tts_hotkey_display = ctk.CTkLabel(
+            hotkey_row, text=self._config.get("tts_hotkey", "ctrl+alt+space"),
+            font=FONTS["body_large_bold"], text_color=COLOR_GREEN, anchor="w",
+        )
+        self._tts_hotkey_display.pack(side="left", fill="x", expand=True)
+
+        self._tts_capture_btn = ctk.CTkButton(
+            hotkey_row, text="🎯 Change", height=28, width=84,
+            font=FONTS["body_small"], fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOVER, corner_radius=6,
+            command=lambda: self._on_tts_capture_click("read"),
+        )
+        self._tts_capture_btn.pack(side="right")
+
+        # ── Swap-voice hotkey ──
+        swap_row = ctk.CTkFrame(card, fg_color="transparent")
+        swap_row.pack(fill="x", padx=20, pady=(0, 6))
+
+        ctk.CTkLabel(
+            swap_row, text="Swap voice hotkey",
+            font=FONTS["body_small"], text_color=COLOR_TEXT_DIM, anchor="w",
+        ).pack(side="left", padx=(0, 8))
+
+        self._tts_swap_hotkey_display = ctk.CTkLabel(
+            swap_row, text=self._config.get("tts_swap_voice_hotkey", "ctrl+alt+v"),
+            font=FONTS["body_large_bold"], text_color=COLOR_GREEN, anchor="w",
+        )
+        self._tts_swap_hotkey_display.pack(side="left", fill="x", expand=True)
+
+        self._tts_swap_capture_btn = ctk.CTkButton(
+            swap_row, text="🎯 Change", height=28, width=84,
+            font=FONTS["body_small"], fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOVER, corner_radius=6,
+            command=lambda: self._on_tts_capture_click("swap"),
+        )
+        self._tts_swap_capture_btn.pack(side="right")
+
+        self._tts_capture_hint = ctk.CTkLabel(
+            card, text="", font=FONTS["body_small"], text_color=COLOR_YELLOW,
+            anchor="w", wraplength=520,
+        )
+        self._tts_capture_hint.pack(fill="x", padx=20, pady=(0, 14))
+
+    def _build_tts_footer(self) -> None:
+        footer = ctk.CTkFrame(self._readout_content, fg_color="transparent")
+        footer.pack(fill="x", padx=16, pady=(14, 18))
+
+        info_row = ctk.CTkFrame(footer, fg_color="transparent")
+        info_row.pack(fill="x")
+
+        ctk.CTkLabel(
+            info_row, text="Read Out v1.0", font=FONTS["body_small"],
+            text_color=COLOR_TEXT_DIM,
+        ).pack(side="left")
+
+        ctk.CTkLabel(
+            info_row, text="Closing hides to the tray", font=FONTS["body_small"],
+            text_color=COLOR_TEXT_DIM,
+        ).pack(side="left", padx=(12, 0))
+
+        quit_btn = ctk.CTkButton(
+            info_row, text="✕ Quit", height=24, width=60,
+            font=FONTS["body_small"], fg_color="transparent",
+            hover_color=COLOR_BORDER, text_color=COLOR_TEXT_DIM, corner_radius=4,
+            command=self.destroy,
+        )
+        quit_btn.pack(side="right")
+
+    # ═══════════════════════════════════════════════════════════
+    #  Read Out (TTS) — event queue handling
+    # ═══════════════════════════════════════════════════════════
+
+    def _handle_tts_event(self, event) -> None:
+        """Handle TTS-related events from the queue."""
+        if isinstance(event, tuple):
+            kind = event[0]
+            if kind == "tts_speech_done":
+                self.app_state.set_tts_status(TTSReadStatus.IDLE)
+                self._update_tts_ui()
+                self._tts_apply_pending_voice_if_idle()
+            elif kind == "tts_speech_error":
+                self.app_state.set_tts_status(TTSReadStatus.ERROR)
+                self.app_state.set_tts_error_message(str(event[1]))
+                self._update_tts_ui()
+                self._tts_apply_pending_voice_if_idle()
+            elif kind == "tts_voices_loaded":
+                self._tts_handle_voices_loaded(event[1], event[2])
+            elif kind == "tts_notice":
+                msg = str(event[1])
+                duration = int(event[2]) if len(event) > 2 else 4000
+                self._tts_show_notice(msg, duration)
+            elif kind == "tts_status_changed":
+                self._update_tts_ui()
+            return
+
+        if event == "toggle_read":
+            self._on_tts_toggle_read()
+        elif event == "cycle_voice":
+            self._on_tts_cycle_voice()
+
+    # ═══════════════════════════════════════════════════════════
+    #  Read Out (TTS) — actions
+    # ═══════════════════════════════════════════════════════════
+
+    def _on_tts_toggle_read(self) -> None:
+        play_pressed_sound()
+        if self.tts_engine.is_speaking() or self.app_state.get_tts_status() == TTSReadStatus.READING:
+            self._on_tts_stop()
+            return
+        if self._tts_busy:
+            return
+        self._on_tts_read_selection()
+
+    def _on_tts_read_selection(self) -> None:
+        if self._tts_busy:
+            return
+        self._tts_busy = True
+        self._tts_cancel_requested = False
+        self.app_state.set_tts_status(TTSReadStatus.READING)
+        self.app_state.set_tts_error_message("")
+        self._update_tts_ui()
+        threading.Thread(
+            target=self._tts_read_selection_worker, daemon=True, name="wavescribe-tts-grab"
+        ).start()
+
+    def _tts_read_selection_worker(self) -> None:
+        in_terminal = selection.is_legacy_terminal_focused()
+        info: dict = {}
+        try:
+            text = selection.grab_selected_text(
+                in_legacy_terminal=in_terminal, info=info
+            )
+        except Exception:
+            text = ""
+        if not text:
+            self._tts_busy = False
+            play_tts_failure_sound()
+            self.app_state.set_tts_status(TTSReadStatus.ERROR)
+            if info.get("image_only"):
+                self.app_state.set_tts_error_message("Selection was an image, not text")
+                msg = "The selection was an image (e.g. a sticker/emoticon), not text — select the text around it and try again."
+            else:
+                self.app_state.set_tts_error_message("No text selected")
+                if in_terminal:
+                    msg = "No text selected — in this terminal, drag to select with the mouse (it copies on release), then try again."
+                else:
+                    msg = "No text selected — select some text and try again."
+            self.event_queue.put(("tts_notice", msg, 8000))
+            self.event_queue.put(("tts_status_changed",))
+            self.event_queue.put(("tts_speech_done",))
+            return
+        self.app_state.set_tts_last_text(text)
+        if in_terminal:
+            self.event_queue.put(("tts_notice", "Read from the clipboard — in this terminal, drag-selecting copies on release.", 6000))
+        self._tts_speak_in_worker(text)
+
+    def _on_tts_speak_box(self) -> None:
+        if self._tts_busy:
+            return
+        text = self._tts_text_box.get("1.0", "end").strip()
+        if not text:
+            play_tts_failure_sound()
+            self.app_state.set_tts_status(TTSReadStatus.ERROR)
+            self.app_state.set_tts_error_message("Type or paste some text first.")
+            self._tts_show_notice("Type or paste some text first.", 8000)
+            self._update_tts_ui()
+            return
+        self._tts_busy = True
+        self._tts_cancel_requested = False
+        self.app_state.set_tts_status(TTSReadStatus.READING)
+        self.app_state.set_tts_error_message("")
+        self._update_tts_ui()
+        threading.Thread(
+            target=self._tts_speak_in_worker, args=(text,), daemon=True, name="wavescribe-tts-speak"
+        ).start()
+
+    def _tts_speak_in_worker(self, text: str) -> None:
+        try:
+            if self._tts_cancel_requested:
+                return
+            play_tts_success_sound()
+            entry = voices_mod.active_voice(self._config)
+            backend = entry.get("backend")
+            if backend not in available_backends():
+                backend = self.tts_engine.get_backend()
+            self.tts_engine.speak(
+                text,
+                voice=entry.get("voice", ""),
+                rate_percent=int(self._config.get("tts_rate_percent", 100)),
+                volume=int(self._config.get("tts_volume", 100)),
+                on_done=lambda: self.event_queue.put(("tts_speech_done",)),
+                backend=backend,
+            )
+        except TTSError as exc:
+            if not self._tts_cancel_requested:
+                play_tts_failure_sound()
+                self.event_queue.put(("tts_speech_error", str(exc)))
+        except Exception as exc:
+            if not self._tts_cancel_requested:
+                play_tts_failure_sound()
+                self.event_queue.put(("tts_speech_error", f"Unexpected error: {exc}"))
+        finally:
+            self._tts_busy = False
+
+    def _on_tts_stop(self) -> None:
+        self._tts_cancel_requested = True
+        self.tts_engine.stop_all()
+        self.app_state.set_tts_status(TTSReadStatus.IDLE)
+        self.app_state.set_tts_error_message("")
+        self._update_tts_ui()
+        self._tts_apply_pending_voice_if_idle()
+
+    # ═══════════════════════════════════════════════════════════
+    #  Read Out (TTS) — voice/backend selection
+    # ═══════════════════════════════════════════════════════════
+
+    def _tts_refresh_voices(self) -> None:
+        backend = self.tts_engine.get_backend()
+        self._tts_voices_state_label.configure(text="Loading voices…")
+        threading.Thread(
+            target=self._tts_voices_worker, args=(backend,), daemon=True,
+            name="wavescribe-tts-voices",
+        ).start()
+
+    def _tts_voices_worker(self, backend: str) -> None:
+        try:
+            voices = self.tts_engine.list_voices(backend)
+        except Exception:
+            voices = []
+        self.event_queue.put(("tts_voices_loaded", backend, voices))
+
+    def _tts_handle_voices_loaded(self, backend: str, voices: list) -> None:
+        if backend != self.tts_engine.get_backend():
+            return
+        self._tts_current_voices = voices
+
+        is_system = backend == "system"
+        entries = [("(System default)", "")] if is_system else []
+        entries += [(v.name, v.name) for v in voices]
+        if not entries:
+            entries = [("(no voices found)", "")]
+        valid = {value for _, value in entries}
+
+        changed = False
+        vl = self._config.setdefault("tts_voice_list", [])
+        if not vl:
+            vl.append({"backend": backend, "voice": "" if is_system else (voices[0].name if voices else "")})
+            changed = True
+
+        if voices:
+            pruned = voices_mod.prune_entries(vl, backend, valid)
+            if len(pruned) != len(vl):
+                vl[:] = pruned
+                changed = True
+            if not vl:
+                vl.append({"backend": backend, "voice": "" if is_system else voices[0].name})
+                changed = True
+            persisted = voices_mod.clamp_index(
+                vl, self._config.get("tts_active_voice_index", 0)
+            )
+            if vl[persisted].get("backend") == backend:
+                idx = persisted
+            else:
+                idx = voices_mod.snap_index(vl, backend, persisted)
+            entry = vl[idx]
+            if entry.get("backend") != backend:
+                idx = voices_mod.ensure_entry(
+                    vl, backend, "" if is_system else voices[0].name
+                )
+                entry = vl[idx]
+                changed = True
+            if entry.get("voice") not in valid:
+                entry["voice"] = "" if is_system else voices[0].name
+                changed = True
+            self._config["tts_active_voice_index"] = voices_mod.clamp_index(vl, idx)
+        else:
+            self._config["tts_active_voice_index"] = voices_mod.clamp_index(
+                vl, self._config.get("tts_active_voice_index", 0)
+            )
+
+        if changed:
+            save_config(self._config)
+
+        count = len(voices)
+        self._tts_voices_state_label.configure(
+            text=f"{count} voice{'s' if count != 1 else ''} available"
+        )
+        self._tts_refresh_voice_widgets()
+        self._tts_update_voice_preview()
+
+    def _on_tts_backend_changed(self, display: str) -> None:
+        name = next((n for n, d in self._tts_backend_options if d == display), "system")
+        if name == self.tts_engine.get_backend():
+            return
+        self.tts_engine.set_backend(name)
+        self._config["tts_backend"] = name
+        save_config(self._config)
+        self._tts_refresh_voices()
+
+    def _on_tts_voice_changed(self, display: str) -> None:
+        value = ""
+        for v in self._tts_current_voices:
+            if v.name == display:
+                value = v.name
+                break
+        voices_mod.set_main_voice(self._config, self.tts_engine.get_backend(), value)
+        save_config(self._config)
+        self._tts_rebuild_secondary_rows()
+        self._tts_update_voice_preview()
+
+    def _tts_update_voice_preview(self) -> None:
+        display = self._tts_voice_menu.get()
+        for v in self._tts_current_voices:
+            if v.name == display:
+                bits = [b for b in (v.language, v.gender) if b]
+                preview = f"{v.name}  ·  {' / '.join(bits)}" if bits else v.name
+                self._tts_voices_state_label.configure(text=preview)
+                return
+        self._tts_voices_state_label.configure(
+            text=f"{len(self._tts_current_voices)} voices available"
+        )
+
+    def _tts_voice_entries(self) -> list:
+        is_system = self.tts_engine.get_backend() == "system"
+        entries = [("(System default)", "")] if is_system else []
+        entries += [(v.name, v.name) for v in self._tts_current_voices]
+        if not entries:
+            entries = [("(no voices found)", "")]
+        return entries
+
+    def _tts_filtered_entries(self) -> list:
+        entries = self._tts_voice_entries()
+        active = voices_mod.active_voice(self._config)
+        always = []
+        if active.get("backend") == self.tts_engine.get_backend():
+            display = next((d for d, v in entries if v == active["voice"]), None)
+            if display:
+                always = [display]
+        query = ""
+        if getattr(self, "_tts_voice_search", None) is not None:
+            query = self._tts_voice_search.get().strip()
+        return voices_mod.filter_entries(entries, query, always)
+
+    def _tts_on_voice_search(self) -> None:
+        self._tts_refresh_voice_widgets()
+        self._tts_update_voice_preview()
+
+    def _tts_clear_voice_search(self) -> None:
+        self._tts_voice_search.delete(0, "end")
+        self._tts_refresh_voice_widgets()
+        self._tts_update_voice_preview()
+        self._tts_voice_search.focus_set()
+
+    def _tts_refresh_voice_widgets(self) -> None:
+        entries = self._tts_filtered_entries()
+        if not entries:
+            entries = [("(no matches — clear search)", "")]
+        self._tts_voice_menu.configure(values=[d for d, _ in entries])
+        active = voices_mod.active_voice(self._config)
+        display = None
+        if active.get("backend") == self.tts_engine.get_backend():
+            display = next((d for d, v in entries if v == active["voice"]), None)
+        self._tts_voice_menu.set(display if display is not None else entries[0][0])
+        self._tts_rebuild_secondary_rows(entries)
+
+    def _on_tts_cycle_voice(self) -> None:
+        play_pressed_sound()
+        vl = self._config.get("tts_voice_list") or []
+        if len(vl) <= 1:
+            self._tts_show_notice(
+                "Add a secondary voice to use voice swapping — pick one below and press ＋ Add voice"
+            )
+            return
+        idx = voices_mod.next_voice_index(vl, self._config.get("tts_active_voice_index", 0))
+        self._config["tts_active_voice_index"] = idx
+        save_config(self._config)
+        entry = vl[idx]
+        if self._tts_busy or self.tts_engine.is_speaking():
+            self._tts_notice_voice_pending = True
+            self._tts_show_notice(
+                f"Voice set to {voices_mod.entry_display(entry)} — applies to the next read"
+            )
+            return
+        self._tts_apply_voice_entry(entry)
+        self._tts_show_notice(f"Voice: {voices_mod.entry_display(entry)}")
+
+    def _tts_apply_voice_entry(self, entry) -> None:
+        backend = entry.get("backend")
+        if backend in available_backends() and backend != self.tts_engine.get_backend():
+            self.tts_engine.set_backend(backend)
+            self._config["tts_backend"] = backend
+            save_config(self._config)
+            display = next(
+                (d for n, d in self._tts_backend_options if n == backend), backend
+            )
+            self._tts_backend_menu.set(display)
+            self._tts_voice_menu.configure(values=["(switching…)"])
+            self._tts_voice_menu.set("(switching…)")
+            self._tts_refresh_voices()
+        else:
+            self._tts_rebuild_secondary_rows()
+
+    def _tts_apply_pending_voice_if_idle(self) -> None:
+        if (
+            getattr(self, "_tts_notice_voice_pending", False)
+            and not self._tts_busy
+            and not self.tts_engine.is_speaking()
+        ):
+            self._tts_notice_voice_pending = False
+            self._tts_apply_voice_entry(voices_mod.active_voice(self._config))
+
+    def _tts_rebuild_secondary_rows(self, entries=None) -> None:
+        if getattr(self, "_tts_secondary_rows_frame", None) is None:
+            return
+        if entries is None:
+            entries = self._tts_filtered_entries()
+        for w in self._tts_secondary_rows_frame.winfo_children():
+            w.destroy()
+
+        backend = self.tts_engine.get_backend()
+        vl = self._config.get("tts_voice_list") or []
+        active = voices_mod.active_voice(self._config)
+
+        if active.get("backend") == backend:
+            display = next((d for d, v in entries if v == active["voice"]), None)
+            if display is not None:
+                self._tts_voice_menu.set(display)
+
+        for i in range(1, len(vl)):
+            entry = vl[i]
+            row = ctk.CTkFrame(self._tts_secondary_rows_frame, fg_color="transparent")
+            row.pack(fill="x", pady=(2, 0))
+
+            badge_text = "Windows" if entry.get("backend") == "system" else "Edge"
+            ctk.CTkLabel(
+                row, text=badge_text, width=56, font=FONTS["body_small"],
+                text_color=COLOR_TEXT_DIM, anchor="w",
+            ).pack(side="left")
+
+            if entry.get("backend") == backend and len(entries) > 1:
+                menu = ctk.CTkOptionMenu(
+                    row, values=[d for d, _ in entries], width=0,
+                    font=FONTS["body_small"], fg_color=COLOR_INPUT_BG,
+                    button_color=COLOR_ACCENT, button_hover_color=COLOR_ACCENT_HOVER,
+                    command=lambda value, i=i: self._on_tts_secondary_changed(i, value),
+                )
+                menu.pack(side="left", fill="x", expand=True, padx=(4, 4))
+                display = next(
+                    (d for d, v in entries if v == entry.get("voice")), None
+                )
+                menu.set(display if display is not None else entries[0][0])
+            else:
+                ctk.CTkLabel(
+                    row, text=entry.get("voice") or "(System default)",
+                    font=FONTS["body_small"], text_color=COLOR_TEXT, anchor="w",
+                ).pack(side="left", fill="x", expand=True, padx=(4, 4))
+
+            remove_btn = ctk.CTkButton(
+                row, text="✕", width=28, height=24,
+                font=FONTS["body_small"], fg_color="transparent",
+                hover_color=COLOR_BORDER, text_color=COLOR_TEXT_DIM, corner_radius=4,
+                command=lambda i=i: self._on_tts_secondary_remove(i),
+            )
+            remove_btn.pack(side="right")
+
+        # Add row
+        query = ""
+        if getattr(self, "_tts_voice_search", None) is not None:
+            query = self._tts_voice_search.get().strip()
+        in_list = {e.get("voice") for e in vl if e.get("backend") == backend}
+        if query:
+            candidates = entries
+        else:
+            candidates = [(d, v) for d, v in entries if v not in in_list]
+        real = [c for c in candidates if c[0] not in ("(no matches — clear search)", "(all voices added — search to find one)")]
+        if real:
+            self._tts_add_menu.configure(values=[d for d, _ in real])
+            self._tts_add_menu.set(real[0][0])
+            self._tts_add_btn.configure(state="normal")
+        else:
+            hint = "(no matches — clear search)" if candidates else "(all voices added — search to find one)"
+            self._tts_add_menu.configure(values=[hint])
+            self._tts_add_menu.set(hint)
+            self._tts_add_btn.configure(state="disabled")
+
+    def _on_tts_secondary_changed(self, index: int, display: str) -> None:
+        value = next(
+            (v.name for v in self._tts_current_voices if v.name == display), ""
+        )
+        vl = self._config.get("tts_voice_list") or []
+        if 0 < index < len(vl):
+            vl[index] = {"backend": self.tts_engine.get_backend(), "voice": value}
+            save_config(self._config)
+        self._tts_rebuild_secondary_rows()
+
+    def _on_tts_secondary_remove(self, index: int) -> None:
+        if voices_mod.remove_entry(self._config, index):
+            save_config(self._config)
+        self._tts_rebuild_secondary_rows()
+        self._tts_update_voice_preview()
+
+    def _on_tts_add_secondary(self) -> None:
+        display = self._tts_add_menu.get()
+        if display in ("(no matches — clear search)", "(all voices added — search to find one)", "(no voices)"):
+            self._tts_rebuild_secondary_rows()
+            return
+        value = next(
+            (v.name for v in self._tts_current_voices if v.name == display), ""
+        )
+        backend = self.tts_engine.get_backend()
+        vl = self._config.get("tts_voice_list") or []
+        existing = [
+            i for i, e in enumerate(vl)
+            if e.get("backend") == backend and e.get("voice") == value
+        ]
+        if existing:
+            where = "it's the main voice" if existing[0] == 0 else "it's already a secondary voice"
+            self._tts_show_notice(f"{display} is already in the list — {where}")
+        elif voices_mod.add_secondary(self._config, backend, value):
+            save_config(self._config)
+            self._tts_show_notice(
+                f"Added {voices_mod.entry_display({'backend': backend, 'voice': value})}"
+            )
+        self._tts_rebuild_secondary_rows()
+
+    # ── TTS Sliders ──
+
+    def _on_tts_rate_changed(self, value) -> None:
+        pct = int(round(value))
+        self._config["tts_rate_percent"] = pct
+        save_config(self._config)
+        self._tts_rate_value_label.configure(text=f"{pct}%")
+
+    def _on_tts_volume_changed(self, value) -> None:
+        vol = int(round(value))
+        self._config["tts_volume"] = vol
+        save_config(self._config)
+        self._tts_volume_value_label.configure(text=str(vol))
+
+    # ── TTS Hotkey capture ──
+
+    def _on_tts_capture_click(self, mode: str = "read") -> None:
+        if self._tts_capturing:
+            self._tts_stop_capturing()
+            return
+        self._tts_capturing = True
+        self._tts_capture_mode = mode
+        self._tts_capture_btn.configure(
+            text="⏹ Cancel", fg_color=COLOR_RED, hover_color=COLOR_RED_HOVER
+        )
+        self._tts_swap_capture_btn.configure(
+            text="⏹ Cancel", fg_color=COLOR_RED, hover_color=COLOR_RED_HOVER
+        )
+        target = "the read hotkey" if mode == "read" else "the voice-swap hotkey"
+        self._tts_capture_hint.configure(
+            text=f"Press your shortcut for {target} (with Ctrl / Alt / Shift)… Esc to cancel."
+        )
+        try:
+            self.hotkey_mgr._remove_tts_hotkeys()
+        except Exception:
+            pass
+        self.focus_force()
+
+    def _tts_stop_capturing(self) -> None:
+        self._tts_capturing = False
+        self._tts_capture_btn.configure(
+            text="🎯 Change", fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER
+        )
+        self._tts_swap_capture_btn.configure(
+            text="🎯 Change", fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER
+        )
+        self._tts_capture_hint.configure(text="")
+        self.hotkey_mgr.set_tts_hotkeys(
+            self._config.get("tts_hotkey", "ctrl+alt+space"),
+            self._config.get("tts_swap_voice_hotkey", "ctrl+alt+v"),
+        )
+
+    def _tts_apply_hotkey(self, combo: str) -> None:
+        if getattr(self, "_tts_capture_mode", "read") == "swap":
+            self._config["tts_swap_voice_hotkey"] = combo
+            self._tts_swap_hotkey_display.configure(text=combo)
+            message = f"Voice-swap hotkey set to {combo}"
+        else:
+            self._config["tts_hotkey"] = combo
+            self._tts_hotkey_display.configure(text=combo)
+            message = f"Read hotkey set to {combo}"
+        save_config(self._config)
+        self.hotkey_mgr.set_tts_hotkeys(
+            self._config.get("tts_hotkey", "ctrl+alt+space"),
+            self._config.get("tts_swap_voice_hotkey", "ctrl+alt+v"),
+        )
+        self._tts_stop_capturing()
+        self._tts_show_notice(message)
+
+    def _tts_show_notice(self, msg: str, duration: int = 4000) -> None:
+        if getattr(self, "_tts_notice_after_id", None) is not None:
+            self.after_cancel(self._tts_notice_after_id)
+        self._tts_notice_label.configure(text=msg)
+        self._tts_notice_after_id = self.after(duration, lambda: self._tts_notice_label.configure(text=""))
+
+    # ── TTS UI update ──
+
+    def _update_tts_ui(self) -> None:
+        status = self.app_state.get_tts_status()
+        error_msg = self.app_state.get_tts_error_message()
+
+        dot_color = {
+            TTSReadStatus.IDLE: COLOR_GREEN,
+            TTSReadStatus.READING: COLOR_YELLOW,
+            TTSReadStatus.ERROR: COLOR_RED,
+        }.get(status, COLOR_GREEN)
+        self._tts_status_dot.configure(text_color=dot_color)
+
+        status_text = {TTSReadStatus.IDLE: "Idle", TTSReadStatus.READING: "Reading…", TTSReadStatus.ERROR: f"Error: {error_msg}"}
+        self._tts_status_label.configure(text=status_text.get(status, "Idle"))
+
+        if status == TTSReadStatus.IDLE:
+            self._tts_read_btn.configure(state="normal")
+            self._tts_stop_btn.configure(state="disabled")
+        elif status == TTSReadStatus.READING:
+            self._tts_read_btn.configure(state="disabled")
+            self._tts_stop_btn.configure(state="normal")
+        else:
+            self._tts_read_btn.configure(state="disabled")
+            self._tts_stop_btn.configure(state="disabled")

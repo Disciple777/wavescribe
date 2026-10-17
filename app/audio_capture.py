@@ -44,6 +44,42 @@ def compute_rms_level(indata: Optional[np.ndarray], floor_db: float = -60.0) -> 
     return float(np.clip(level, 0.0, 1.0))
 
 
+def list_input_devices() -> list:
+    """Return a list of available audio input devices.
+
+    Each entry is a dict with keys: ``id`` (int or "default"),
+    ``name`` (human-readable), and ``channels`` (int).
+    """
+    devices = sd.query_devices()
+    result = [{"id": "default", "name": "Default Microphone", "channels": 0}]
+    try:
+        default_input = sd.default.device
+        default_idx = default_input[0] if isinstance(default_input, tuple) else default_input
+    except Exception:
+        default_idx = None
+    for i, dev in enumerate(devices):
+        if dev.get("max_input_channels", 0) > 0:
+            result.append({
+                "id": i,
+                "name": dev.get("name", f"Device {i}"),
+                "channels": dev.get("max_input_channels", 0),
+            })
+    return result
+
+
+def get_device_display_name(device_id) -> str:
+    """Return a short display name for a device ID."""
+    if device_id == "default" or device_id is None:
+        return "Default"
+    try:
+        dev = sd.query_devices(int(device_id))
+        name = dev.get("name", f"Device {device_id}")
+        # Truncate long names
+        return name if len(name) <= 30 else name[:27] + "..."
+    except Exception:
+        return str(device_id)
+
+
 class AudioCapture:
     """Captures microphone input and returns WAV bytes."""
 
@@ -52,22 +88,36 @@ class AudioCapture:
         self.buffer: list[np.ndarray] = []
         self.stream: Optional[sd.InputStream] = None
         self._is_recording = False
+        self._input_device = None  # device index or None for default
         # Smoothed input level (0.0–1.0) for the live meter, updated in the
         # audio callback thread and read from the GUI thread.
         self._level = 0.0
         self._level_lock = threading.Lock()
 
+    def set_input_device(self, device_id) -> None:
+        """Set the input device for the next recording.
+
+        Args:
+            device_id: "default" or an integer device index.
+        """
+        if device_id == "default" or device_id is None:
+            self._input_device = None
+        else:
+            self._input_device = int(device_id)
+
     def start(self) -> None:
-        """Start capturing audio from the default microphone.
+        """Start capturing audio from the selected microphone.
 
         Raises AudioCaptureError if no microphone is available.
         """
         try:
-            # Test that we have a valid input device
-            devices = sd.query_devices()
-            default_input = sd.default.device
-            if default_input is None or (isinstance(default_input, tuple) and default_input[0] is None):
-                raise AudioCaptureError("No default input device found. Please connect a microphone.")
+            if self._input_device is not None:
+                # Verify the specific device exists
+                sd.check_inputdevice(self._input_device)
+            else:
+                default_input = sd.default.device
+                if default_input is None or (isinstance(default_input, tuple) and default_input[0] is None):
+                    raise AudioCaptureError("No default input device found. Please connect a microphone.")
         except AudioCaptureError:
             raise
         except Exception as e:
@@ -79,12 +129,15 @@ class AudioCapture:
             self._level = 0.0
 
         try:
-            self.stream = sd.InputStream(
+            kwargs = dict(
                 samplerate=self.samplerate,
                 channels=1,
                 callback=self._callback,
                 dtype=np.float32,
             )
+            if self._input_device is not None:
+                kwargs["device"] = self._input_device
+            self.stream = sd.InputStream(**kwargs)
             self.stream.start()
         except Exception as e:
             self._is_recording = False

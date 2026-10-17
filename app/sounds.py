@@ -19,6 +19,9 @@ import winsound
 # Cached paths to generated WAV files
 _START_WAV_PATH: str | None = None
 _STOP_WAV_PATH: str | None = None
+_PRESSED_WAV_PATH: str | None = None  # TTS hotkey heard
+_SUCCESS_WAV_PATH: str | None = None  # TTS text grabbed, reading started
+_FAILURE_WAV_PATH: str | None = None  # TTS nothing to read / failed
 _INITIALIZED = False
 
 
@@ -107,6 +110,26 @@ def init_sounds() -> None:
     with open(_STOP_WAV_PATH, "wb") as f:
         f.write(stop_wav)
 
+    # TTS hotkey heard — short, quiet blip so frequent presses aren't annoying.
+    pressed_path = os.path.join(temp, "wavescribe_pressed.wav")
+    with open(pressed_path, "wb") as f:
+        f.write(_generate_wav([660.0, 660.0], [0.18, 0.18], 0.12))
+
+    # TTS text grabbed, speech starting — pleasant rising tone (C5 → G5).
+    success_path = os.path.join(temp, "wavescribe_tts_success.wav")
+    with open(success_path, "wb") as f:
+        f.write(_generate_wav([523.0, 784.0], [0.22, 0.22], 0.20))
+
+    # TTS nothing to read / failed — low descending buzz with a fade.
+    failure_path = os.path.join(temp, "wavescribe_tts_failure.wav")
+    with open(failure_path, "wb") as f:
+        f.write(_generate_wav([260.0, 110.0], [0.26, 0.14], 0.30))
+
+    global _PRESSED_WAV_PATH, _SUCCESS_WAV_PATH, _FAILURE_WAV_PATH  # noqa: PLW0603
+    _PRESSED_WAV_PATH = pressed_path
+    _SUCCESS_WAV_PATH = success_path
+    _FAILURE_WAV_PATH = failure_path
+
     _INITIALIZED = True
 
 
@@ -130,5 +153,32 @@ def play_stop_sound() -> None:
     if _STOP_WAV_PATH and os.path.exists(_STOP_WAV_PATH):
         winsound.PlaySound(
             _STOP_WAV_PATH,
+            winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
+        )
+
+
+def play_pressed_sound() -> None:
+    """Play the 'TTS hotkey heard, attempting a read' cue."""
+    if _PRESSED_WAV_PATH and os.path.exists(_PRESSED_WAV_PATH):
+        winsound.PlaySound(
+            _PRESSED_WAV_PATH,
+            winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
+        )
+
+
+def play_tts_success_sound() -> None:
+    """Play the 'TTS text grabbed, reading started' cue."""
+    if _SUCCESS_WAV_PATH and os.path.exists(_SUCCESS_WAV_PATH):
+        winsound.PlaySound(
+            _SUCCESS_WAV_PATH,
+            winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
+        )
+
+
+def play_tts_failure_sound() -> None:
+    """Play the 'TTS nothing was read' cue (no selection / error)."""
+    if _FAILURE_WAV_PATH and os.path.exists(_FAILURE_WAV_PATH):
+        winsound.PlaySound(
+            _FAILURE_WAV_PATH,
             winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
         )
