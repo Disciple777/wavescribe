@@ -82,6 +82,15 @@ class HistoryManager:
                 return dict(self._entries[index])
             return None
 
+    def delete(self, index: int) -> bool:
+        """Remove the entry at ``index`` (0 = newest)."""
+        with self._lock:
+            if 0 <= index < len(self._entries):
+                del self._entries[index]
+                self._save()
+                return True
+            return False
+
     def count(self) -> int:
         """Number of stored entries."""
         with self._lock:

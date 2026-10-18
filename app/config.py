@@ -29,6 +29,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "local_model_status": "ready",  # models are bundled or auto-downloaded
     "hotkey_start": "ctrl+shift+r",
     "hotkey_stop": "ctrl+shift+s",
+    "hotkey_session": "ctrl+shift+l",  # start / pause hands-free listening
     "autostart": True,  # launch WaveScribe automatically when Windows starts
     "history_enabled": True,  # save dictations to the transcription history
     # ── Microphone selection ──
@@ -43,6 +44,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "tts_swap_voice_hotkey": "ctrl+alt+v",  # cycle through the voice list
     "tts_voice_list": [],            # [{"backend": "system"|"edge", "voice": str}, …]
     "tts_active_voice_index": 0,     # pointer into tts_voice_list
+    # ── Listening sessions ──
+    "active_session_id": "",          # session that receives notes ("" = none)
+    "session_pause_s": 1.2,           # pause length that ends a note
+    "session_sensitivity": "medium",  # low | medium | high (speech detection)
+    "session_paste_dictations": False,  # also paste hotkey dictations while a session is active
+    "session_copy_style": "list",     # list | numbered | paragraphs
+    # ── Appearance ──
+    "theme": "dark",                  # dark | light | system
 }
 
 CONFIG_FILENAME = "config.json"

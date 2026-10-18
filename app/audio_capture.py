@@ -44,6 +44,14 @@ def compute_rms_level(indata: Optional[np.ndarray], floor_db: float = -60.0) -> 
     return float(np.clip(level, 0.0, 1.0))
 
 
+def float_to_wav_bytes(audio: np.ndarray, samplerate: int = 16000) -> bytes:
+    """Encode float32 [-1, 1] mono samples as 16-bit WAV bytes."""
+    audio_int16 = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
+    buf = io.BytesIO()
+    wavfile.write(buf, samplerate, audio_int16)
+    return buf.getvalue()
+
+
 def list_input_devices() -> list:
     """Return a list of available audio input devices.
 
@@ -179,13 +187,7 @@ class AudioCapture:
         # Concatenate all audio chunks into a single array
         audio = np.concatenate(self.buffer, axis=0)
 
-        # Convert float32 [-1.0, 1.0] to int16 [-32768, 32767]
-        audio_int16 = (audio * 32767).astype(np.int16)
-
-        # Write to WAV in memory
-        buf = io.BytesIO()
-        wavfile.write(buf, self.samplerate, audio_int16)
-        return buf.getvalue()
+        return float_to_wav_bytes(audio, self.samplerate)
 
     def is_recording(self) -> bool:
         """Return whether audio is currently being captured."""

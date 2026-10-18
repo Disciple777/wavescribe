@@ -8,6 +8,8 @@ Record your microphone, get real-time AI transcription via OpenAI Whisper (cloud
 
 ## ✨ Features
 
+- **🗣️ Listening sessions (hands-free)**: Press Ctrl+Shift+L and just talk while you test an app or play a game. Every pause turns what you said into a note; silence is skipped. Notes collect into one session you can edit, copy as a bulleted list (ready to paste into a coding agent) or export as Markdown. While a session is active, your normal dictation shortcut adds notes to it instead of pasting.
+- **🖥️ Modern interface**: HTML/CSS UI hosted in a native window (Edge WebView2), with dark/light themes, a sidebar (Dictate · Sessions · Read Out · History · Settings) and a floating status pill that shows recording / listening / "note added".
 - **🎤 Dual transcription engine**: OpenAI Whisper API (cloud) or local `openai-whisper` model (offline-capable)
 - **⌨️ Global hotkeys**: Ctrl+Shift+R to start recording, Ctrl+Shift+S to stop & transcribe — works from any app
 - **📝 Smart formatting**: \~40 spoken punctuation commands (`"comma" → ","`, `"open paren" → "("`), auto-capitalization, numbers-as-digits conversion, redundant punctuation cleanup
@@ -157,14 +159,17 @@ wavescribe/
 ├── WaveScribe-Plan.md         # Original planning document
 │
 ├── app/
-│   ├── gui.py                 # CustomTkinter main window (all UI)
+│   ├── core.py                # App logic (UI-agnostic): dictation, sessions, Read Out, settings
+│   ├── webui.py               # pywebview host: main window, overlay, JS bridge
+│   ├── web/                   # index.html, app.css, app.js, overlay.html, fonts
+│   ├── listening.py           # Hands-free mic stream + voice-activity segmenter
+│   ├── sessions.py            # Listening-session store (%APPDATA%\WaveScribe\sessions)
 │   ├── state.py               # Thread-safe AppState, enums, event queue
 │   ├── audio_capture.py       # sounddevice microphone → WAV bytes
 │   ├── transcriber.py         # Cloud (OpenAI API) + Local (openai-whisper)
 │   ├── formatter.py           # 40+ punctuation replacements, spacing, caps
 │   ├── typer.py               # Clipboard-based text insertion (Ctrl+V)
 │   ├── hotkeys.py             # Global hotkey registration & management
-│   ├── overlay.py             # Floating status indicator (always-on-top)
 │   ├── autostart.py           # HKCU Run-key registry helpers (launch at login)
 │   ├── history.py             # Thread-safe transcription history (JSON)
 │   ├── sounds.py              # Synthesized start/stop sound effects
@@ -283,7 +288,7 @@ ItemWhy`app/`Source code (\~0.2 MB)`subtitleforge/` (excluding `ffmpeg_bin/`)Sub
 
 ## 🧰 Technology Stack
 
-ComponentLibraryPurpose**GUI**`customtkinter`Modern dark-themed native widgets**Audio Capture**`sounddevice`PortAudio bindings, mic input**WAV Conversion**`scipy`NumPy audio → WAV bytes**Cloud Transcription**`openai`OpenAI Whisper API client**Local Transcription**`openai-whisper`Local Whisper model (tiny/base/small)**Text Insertion**`pyperclip` + `pyautogui`Clipboard copy & Ctrl+V paste**Global Hotkeys**`keyboard`System-wide keyboard shortcuts**System Tray**`pystray` + `Pillow`Tray icon with context menu**Fonts**Bundled `.ttf`Poppins & Montserrat (private GDI load)**Sound**`winsound` (stdlib)Synthesized start/stop tones**Testing**`pytest`Unit test framework**Packaging**`PyInstaller`Standalone .exe bundler**Installer**`Inno Setup`Windows installer (.exe)
+ComponentLibraryPurpose**GUI**`pywebview` (Edge WebView2)HTML/CSS/JS interface in a native window**Audio Capture**`sounddevice`PortAudio bindings, mic input**WAV Conversion**`scipy`NumPy audio → WAV bytes**Cloud Transcription**`openai`OpenAI Whisper API client**Local Transcription**`openai-whisper`Local Whisper model (tiny/base/small)**Text Insertion**`pyperclip` + `pyautogui`Clipboard copy & Ctrl+V paste**Global Hotkeys**`keyboard`System-wide keyboard shortcuts**System Tray**`pystray` + `Pillow`Tray icon with context menu**Fonts**Bundled `.ttf`Poppins & Montserrat (private GDI load)**Sound**`winsound` (stdlib)Synthesized start/stop tones**Testing**`pytest`Unit test framework**Packaging**`PyInstaller`Standalone .exe bundler**Installer**`Inno Setup`Windows installer (.exe)
 
 ---
 

@@ -1,68 +1,39 @@
-"""Regression test: the GUI must construct and update without crashing.
+"""Regression tests for the HTML UI wiring.
 
-This guards against startup crashes like the v1.3 release bug:
-``AttributeError: '_tkinter.tkapp' object has no attribute '_settings_card'``
-raised from ``App.__init__`` -> ``_update_ui``.
-
-Requires a display; skipped gracefully on headless machines.
+The view is HTML/JS (app/web) talking to ``app.webui.Bridge`` through
+pywebview. These tests need no display: they check that every
+``api.<method>(…)`` the JavaScript calls exists on the bridge, and that
+the files the windows load are present.
 """
-import pytest
+import os
+import re
 
-ctk = pytest.importorskip("customtkinter")
-
-from app.state import AppState, create_event_queue, AppMode  # noqa: E402
-from app.audio_capture import AudioCapture  # noqa: E402
-from app.hotkeys import HotkeyManager  # noqa: E402
-from app.gui import App  # noqa: E402
-from app.tts_engine import EngineManager  # noqa: E402
+from app.webui import Bridge, WEB_DIR
 
 
-def _display_available() -> bool:
-    """Check whether a Tk display is available before building the GUI."""
-    import tkinter as tk
-
-    try:
-        root = tk.Tk()
-        root.destroy()
-        return True
-    except Exception:
-        return False
+def _js_api_calls() -> set:
+    with open(os.path.join(WEB_DIR, "app.js"), encoding="utf-8") as f:
+        source = f.read()
+    return set(re.findall(r"\bapi\.(\w+)\(", source))
 
 
-pytestmark = pytest.mark.skipif(
-    not _display_available(), reason="no display available"
-)
+def test_every_js_api_call_exists_on_bridge() -> None:
+    calls = _js_api_calls()
+    assert len(calls) > 30  # sanity: the regex really found the calls
+    missing = sorted(name for name in calls if not callable(getattr(Bridge, name, None)))
+    assert missing == [], f"app.js calls bridge methods that don't exist: {missing}"
 
 
-def test_gui_constructs_and_updates() -> None:
-    """App() must build every card and survive repeated _update_ui calls."""
-    ctk.set_appearance_mode("dark")
-    ctk.set_default_color_theme("blue")
+def test_web_assets_present() -> None:
+    for name in ("index.html", "app.css", "app.js", "overlay.html", "fonts/Poppins-Regular.ttf"):
+        assert os.path.exists(os.path.join(WEB_DIR, name)), name
 
-    state = AppState()
-    event_queue = create_event_queue()
-    audio = AudioCapture()
-    hotkey_mgr = HotkeyManager(event_queue)
 
-    tts_engine = EngineManager()
-    app = App(state, audio, event_queue, hotkey_mgr, tts_engine)
-
-    try:
-        # Exercise the full UI update path a few times to catch widget-order bugs
-        for _ in range(3):
-            app._update_ui()
-            app.update_idletasks()
-
-        # Toggle history off/on — exercises the _settings_card ordering path
-        state.set_history_enabled(False)
-        app._update_ui()
-        state.set_history_enabled(True)
-        app._update_ui()
-
-        # Toggle mode — exercises the local-language visibility path
-        state.set_mode(AppMode.LOCAL)
-        app._update_ui()
-        state.set_mode(AppMode.CLOUD)
-        app._update_ui()
-    finally:
-        app.destroy()
+def test_html_ids_used_by_js_exist() -> None:
+    with open(os.path.join(WEB_DIR, "index.html"), encoding="utf-8") as f:
+        html = f.read()
+    with open(os.path.join(WEB_DIR, "app.js"), encoding="utf-8") as f:
+        js = f.read()
+    ids = set(re.findall(r'id="([\w-]+)"', html)) | set(re.findall(r'id="([\w-]+)"', js))
+    used = set(re.findall(r'\$\("#([\w-]+)"\)', js))
+    assert sorted(used - ids) == []

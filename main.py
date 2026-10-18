@@ -12,24 +12,19 @@ project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-import customtkinter as ctk
-
-from app.state import AppState, create_event_queue, AppStatus
+from app.state import AppState, create_event_queue
 from app.audio_capture import AudioCapture
 from app.hotkeys import HotkeyManager
 from app.config import load_config
 from app.autostart import apply_autostart_setting, is_autostart_enabled
 from app.tray import create_tray
-from app.gui import App
+from app.core import WaveScribeCore
+from app.webui import WebUI
 from app.tts_engine import EngineManager
 
 
 def main() -> None:
     """Start WaveScribe application."""
-
-    # ── Set theme ──
-    ctk.set_appearance_mode("dark")
-    ctk.set_default_color_theme("blue")
 
     # ── Initialize state & components ──
     state = AppState()
@@ -51,18 +46,8 @@ def main() -> None:
     # ── Initialize TTS engine ──
     tts_engine = EngineManager(config.get("tts_backend", "system"))
 
-    # ── Start hotkey listener (daemon thread) ──
+    # ── Hotkey listener (daemon thread); the core registers the shortcuts ──
     hotkey_mgr = HotkeyManager(event_queue)
-    hotkey_mgr.set_hotkeys(
-        config.get("hotkey_start", "ctrl+shift+r"),
-        config.get("hotkey_stop", "ctrl+shift+s"),
-    )
-    # Register TTS hotkeys
-    hotkey_mgr.set_tts_hotkeys(
-        config.get("tts_hotkey", "ctrl+alt+space"),
-        config.get("tts_swap_voice_hotkey", "ctrl+alt+v"),
-    )
-
     hotkey_thread = threading.Thread(
         target=hotkey_mgr.run,
         daemon=True,
@@ -70,18 +55,18 @@ def main() -> None:
     )
     hotkey_thread.start()
 
-    # ── Create GUI (pass hotkey_mgr + tts_engine for dynamic updates) ──
-    app = App(state, audio, event_queue, hotkey_mgr, tts_engine)
+    # ── Core (all app logic) + HTML view ──
+    core = WaveScribeCore(state, audio, event_queue, hotkey_mgr, tts_engine, config=config)
+    icon_path = os.path.join(project_root, "assets", "icon.png")
+    ui = WebUI(core, icon_path=icon_path)
+    core.start()
 
     # ── System tray ──
-    icon_path = os.path.join(project_root, "assets", "icon.png")
     tray = create_tray(
-        show_callback=app.show_window,
-        quit_callback=app.destroy,
+        show_callback=ui.show,
+        quit_callback=ui.quit,
         icon_path=icon_path,
     )
-
-    # Run tray in a daemon thread
     tray_thread = threading.Thread(
         target=tray.run,
         daemon=True,
@@ -89,8 +74,15 @@ def main() -> None:
     )
     tray_thread.start()
 
-    # ── Run GUI (blocks main thread) ──
-    app.mainloop()
+    # ── Run UI (blocks main thread until quit) ──
+    ui.run()
+
+    try:
+        tray.stop()
+    except Exception:
+        pass
+    # Daemon threads (keyboard hook, audio) may hold the process open.
+    os._exit(0)
 
 
 if __name__ == "__main__":

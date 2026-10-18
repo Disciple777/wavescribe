@@ -14,8 +14,9 @@ import keyboard
 class HotkeyManager:
     """Manages global hotkeys with support for dynamic updates.
 
-    Supports two sets of hotkeys:
+    Supports three sets of hotkeys:
       - Dictation: start_recording / stop_recording
+      - Listening sessions: toggle_listening
       - TTS Read Out: toggle_read / cycle_voice
     """
 
@@ -25,6 +26,7 @@ class HotkeyManager:
         self._stop_handler: Optional[keyboard.HotKey] = None
         self._tts_read_handler: Optional[keyboard.HotKey] = None
         self._tts_swap_handler: Optional[keyboard.HotKey] = None
+        self._session_handler: Optional[keyboard.HotKey] = None
 
         # Clear any stuck modifiers from previous sessions
         self._release_all_modifiers()
@@ -61,6 +63,22 @@ class HotkeyManager:
             self._tts_swap_handler = keyboard.add_hotkey(
                 swap_combo,
                 lambda: self._event_queue.put("cycle_voice"),
+                suppress=False,
+            )
+
+    def set_session_hotkey(self, combo: str = "") -> None:
+        """Set (or update) the listening-session toggle hotkey."""
+        if self._session_handler is not None:
+            try:
+                keyboard.remove_hotkey(self._session_handler)
+            except Exception:
+                pass
+            self._session_handler = None
+        combo = (combo or "").strip()
+        if combo:
+            self._session_handler = keyboard.add_hotkey(
+                combo,
+                lambda: self._event_queue.put("toggle_listening"),
                 suppress=False,
             )
 
