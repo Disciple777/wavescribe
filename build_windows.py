@@ -226,13 +226,13 @@ a = Analysis(
 pyz = PYZ(a.pure)
 
 # ── Block 3: EXE (wrapper loader) ─────────────────────────────────
+# exclude_binaries=True: binaries/datas go only into COLLECT (_internal/),
+# so the exe runs in place instead of self-extracting a full copy to %TEMP%.
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="{APP_NAME}",
     debug=False,
     bootloader_ignore_signals=False,

@@ -200,7 +200,6 @@ class WebUI:
         self._quitting = False
         self._outbox: "queue.Queue[tuple]" = queue.Queue()
         self._overlay_visible = False
-        self._overlay_placed = False
         self._note_flash: Optional[tuple] = None  # (until, text)
         self._dark_titlebar: Optional[bool] = None
 
@@ -219,6 +218,10 @@ class WebUI:
             "WaveScribe status",
             url=os.path.join(WEB_DIR, "overlay.html"),
             width=OVERLAY_W, height=OVERLAY_H,
+            # pywebview ignores hidden=True for frameless transparent windows,
+            # so the overlay starts off-screen and is moved into the corner
+            # only when it has something to show.
+            x=-10000, y=-10000,
             frameless=True, on_top=True, transparent=True, focus=False,
             hidden=True, easy_drag=False, resizable=False,
         )
@@ -237,7 +240,9 @@ class WebUI:
         # pywebview's JS calls block forever on a page that hasn't loaded,
         # so nothing is sent to a window before its `loaded` event.
         self.window.events.loaded.wait(20)
-        self._place_overlay()
+        # Hiding before WebView2 finishes initialising aborts it, so wait.
+        if self.overlay.events.loaded.wait(20) and not self._overlay_visible:
+            self.overlay.hide()
         self._apply_window_chrome()
         threading.Thread(target=self._io_loop, daemon=True, name="ui-io").start()
 
@@ -337,6 +342,7 @@ class WebUI:
                 continue
             if not self._overlay_visible:
                 self._overlay_visible = True
+                self._place_overlay()
                 self.overlay.show()
                 self.overlay.events.loaded.wait(5)
             if state != last_overlay:
@@ -393,12 +399,9 @@ class WebUI:
         return None
 
     def _place_overlay(self) -> None:
-        if self._overlay_placed:
-            return
         try:
             _, _, right, bottom = _work_area()
             self.overlay.move(right - OVERLAY_W - 12, bottom - OVERLAY_H - 40)
-            self._overlay_placed = True
         except Exception:
             pass
 

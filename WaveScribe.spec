@@ -13,7 +13,7 @@ a = Analysis(
     binaries=[],
     datas=[
         (r"C:\Users\CPU\Documents\Programas\codex\wavescribe\assets", "assets"),
-        (r"C:\Users\CPU\Documents\Programas\codex\wavescribe\.venv\Lib\site-packages\customtkinter\assets", "customtkinter/assets"),
+        (r"C:\Users\CPU\Documents\Programas\codex\wavescribe\app\web", "app/web"),
         (r"C:\Users\CPU\Documents\Programas\codex\wavescribe\.venv\Lib\site-packages\whisper\assets", "whisper/assets"),
         (r"C:\Users\CPU/.cache/whisper\base.pt", "whisper_models/base.pt"),
     ],
@@ -23,23 +23,32 @@ a = Analysis(
         "app.audio_capture",
         "app.autostart",
         "app.config",
+        "app.core",
         "app.edge_tts",
         "app.formatter",
-        "app.gui",
         "app.history",
         "app.hotkeys",
-        "app.overlay",
+        "app.listening",
         "app.selection",
+        "app.sessions",
         "app.sounds",
         "app.state",
         "app.system_tts",
-        "app.theme",
         "app.transcriber",
         "app.tray",
         "app.tts_engine",
         "app.tts_errors",
         "app.typer",
         "app.voices",
+        "app.webui",
+        # HTML UI host (Edge WebView2 via pythonnet / WinForms)
+        "webview",
+        "webview.platforms.edgechromium",
+        "webview.platforms.winforms",
+        "clr",
+        "clr_loader",
+        "bottle",
+        "proxy_tools",
         # Sound device (CFFI backend)
         "sounddevice",
         "_sounddevice_data",
@@ -72,25 +81,17 @@ a = Analysis(
         "edge_tts",
         "aiohttp",
         "tabulate",
-        # Tkinter extras
-        "tkinter",
-        "tkinter.font",
-        "tkinter.filedialog",
-        # Windows system libraries for keyboard/pystray
-        "pywintypes",
-        "win32api",
-        "win32con",
-        "win32file",
-        "win32gui",
-        "win32process",
+        # Windows system libraries
+        # (pystray/keyboard use ctypes on Windows — pywin32 is NOT a dependency,
+        #  so hidden imports for pywintypes/win32* would just log 'not found' errors)
         # Windows auto-start (registry)
         "winreg",
         # PyAutoGUI / typing
         "pyperclip",
         "pyautogui",
         "pytweening",
-        "PyGetWindow",
-        "PyMsgBox",
+        "pygetwindow",
+        "pymsgbox",
         "pyscreeze",
         # pystray dependency
         "six",
@@ -113,13 +114,13 @@ a = Analysis(
 pyz = PYZ(a.pure)
 
 # ── Block 3: EXE (wrapper loader) ─────────────────────────────────
+# exclude_binaries=True: binaries/datas go only into COLLECT (_internal/),
+# so the exe runs in place instead of self-extracting a full copy to %TEMP%.
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="WaveScribe",
     debug=False,
     bootloader_ignore_signals=False,
